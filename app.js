@@ -32,7 +32,7 @@ const getApiKey = () => localStorage.getItem("ft_apikey") || "";
 let db = null;
 function openDB() {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open("fittrack", 1);
+    const req = indexedDB.open("fittrack", 2);
     req.onupgradeneeded = () => {
       const d = req.result;
       if (!d.objectStoreNames.contains("meals")) {
@@ -42,6 +42,8 @@ function openDB() {
       if (!d.objectStoreNames.contains("health")) d.createObjectStore("health", { keyPath: "date" });
       if (!d.objectStoreNames.contains("workouts")) d.createObjectStore("workouts", { keyPath: "id", autoIncrement: true });
       if (!d.objectStoreNames.contains("hkworkouts")) d.createObjectStore("hkworkouts", { keyPath: "id", autoIncrement: true });
+      if (!d.objectStoreNames.contains("exercises")) d.createObjectStore("exercises", { keyPath: "id", autoIncrement: true });
+      if (!d.objectStoreNames.contains("coach")) d.createObjectStore("coach", { keyPath: "id", autoIncrement: true });
     };
     req.onsuccess = () => { db = req.result; resolve(db); };
     req.onerror = () => reject(req.error);
@@ -71,6 +73,7 @@ document.querySelectorAll("nav button").forEach((btn) => {
     $(btn.dataset.tab).classList.add("active");
     if (btn.dataset.tab === "tab-health") renderHealth();
     if (btn.dataset.tab === "tab-food") renderFood();
+    if (btn.dataset.tab === "tab-gym") renderGym();
   });
 });
 
@@ -594,6 +597,134 @@ $("mealSaveBtn").addEventListener("click", async () => {
   renderFood();
 });
 
+
+/* ==================================================
+   運動紀錄 + AI 教練
+================================================== */
+const EX_TYPES = ["重訓", "跑步", "游泳", "騎車", "健走", "其他"];
+const expandedExDays = new Set();
+window.toggleExDay = (d) => {
+  if (expandedExDays.has(d)) expandedExDays.delete(d); else expandedExDays.add(d);
+  const el = document.getElementById("exday-" + d);
+  if (el) el.style.display = expandedExDays.has(d) ? "block" : "none";
+  const a = document.getElementById("exarrow-" + d);
+  if (a) a.textContent = expandedExDays.has(d) ? "▾" : "▸";
+};
+window.deleteExercise = async (id) => { await idbDel("exercises", id); renderGym(); };
+
+async function renderGym() {
+  const all = await idbAll("exercises");
+  const coach = await idbAll("coach");
+  const today = todayStr();
+
+  const t = all.filter((e) => e.date === today).sort((a, b) => a.ts - b.ts);
+  $("exList").innerHTML = t.length === 0 ? '<p class="sub small">今天還沒記錄運動</p>' :
+    t.map((e) =>
+      '<div class="listitem"><div class="grow"><div class="name">' + e.type + '</div>'
+      + '<div class="detail">' + escapeHtml(e.desc) + '</div></div>'
+      + '<button class="secondary" style="padding:4px 10px; font-size:12px" onclick="deleteExercise(' + e.id + ')">刪除</button></div>'
+    ).join("");
+
+  const todayNotes = coach.filter((c) => c.date === today).sort((a, b) => b.ts - a.ts);
+  if (todayNotes.length && !$("coachOutput").textContent) $("coachOutput").textContent = todayNotes[0].text;
+
+  const byDay = {};
+  all.forEach((e) => { if (e.date !== today) (byDay[e.date] = byDay[e.date] || { ex: [], note: "" }).ex.push(e); });
+  coach.forEach((c) => {
+    if (c.date === today) return;
+    if (!byDay[c.date]) byDay[c.date] = { ex: [], note: "" };
+    byDay[c.date].note = c.text;
+  });
+  const days = Object.keys(byDay).sort().reverse().slice(0, 30);
+  $("exHistory").innerHTML = days.length === 0 ? '<p class="sub small">記錄幾天後,這裡會顯示每天的運動與 AI 建議</p>' :
+    days.map((d) => {
+      const g = byDay[d];
+      const open = expandedExDays.has(d);
+      return '<div class="listitem" style="cursor:pointer" onclick="toggleExDay(\'' + d + '\')">'
+        + '<div class="grow"><div class="name"><span id="exarrow-' + d + '">' + (open ? "▾" : "▸") + '</span> '
+        + d.slice(5).replace("-", "/") + "(" + weekdayName(d) + ")" + '</div>'
+        + '<div class="detail">' + (g.ex.map((e) => e.type + " " + e.desc).join("、") || "無運動") + (g.note ? "・含 AI 建議" : "") + '</div></div></div>'
+        + '<div id="exday-' + d + '" style="display:' + (open ? "block" : "none") + '; padding-left:10px">'
+        + g.ex.map((e) => '<div class="listitem"><div class="grow"><div class="name" style="font-size:13px">' + e.type + '</div><div class="detail">' + escapeHtml(e.desc) + '</div></div></div>').join("")
+        + (g.note ? '<p class="sub small" style="white-space:pre-wrap; color:var(--teal)">' + escapeHtml(g.note) + '</p>' : "")
+        + '</div>';
+    }).join("");
+}
+(function initExTypes() {
+  const sel = $("exType");
+  EX_TYPES.forEach((t) => { const o = document.createElement("option"); o.value = t; o.textContent = t; sel.appendChild(o); });
+})();
+$("exAddBtn").addEventListener("click", async () => {
+  const desc = $("exDesc").value.trim();
+  if (!desc) { toast("先填一下運動內容吧"); return; }
+  await idbPut("exercises", { date: todayStr(), ts: Date.now(), type: $("exType").value, desc });
+  $("exDesc").value = "";
+  toast("已記錄運動");
+  renderGym();
+});
+
+/* 通用 Gemini 文字請求(模型自動輪替) */
+async function geminiText(key, prompt) {
+  const body = { contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.4 } };
+  const cached = localStorage.getItem("ft_model");
+  let candidates = MODEL_CANDIDATES.slice();
+  if (cached) candidates = [cached].concat(candidates.filter((m) => m !== cached));
+  let resp = null;
+  for (const model of candidates) {
+    try { resp = await geminiCall(model, key, body); }
+    catch (e) { throw new Error("連線失敗,請確認網路。"); }
+    if (resp.status === 404) { resp = null; continue; }
+    if (resp.ok) localStorage.setItem("ft_model", model);
+    break;
+  }
+  if (resp === null) {
+    const found = await listFlashModel(key);
+    if (found) { resp = await geminiCall(found, key, body); if (resp.ok) localStorage.setItem("ft_model", found); }
+  }
+  if (!resp) throw new Error("目前找不到可用的 Gemini 模型,請稍後再試。");
+  if (!resp.ok) {
+    if (resp.status === 400 || resp.status === 403) throw new Error("API Key 可能有誤(HTTP " + resp.status + ")");
+    if (resp.status === 429) throw new Error("已達免費額度上限,請稍後再試。");
+    throw new Error("AI 分析失敗(HTTP " + resp.status + ")");
+  }
+  const json = await resp.json();
+  try { return json.candidates[0].content.parts[0].text; }
+  catch (e) { throw new Error("AI 回覆格式無法解析"); }
+}
+
+$("coachBtn").addEventListener("click", async () => {
+  const key = getApiKey();
+  if (!key) { $("coachStatus").textContent = "請先到「設定」貼上 Gemini API Key。"; return; }
+  const btn = $("coachBtn");
+  btn.disabled = true;
+  $("coachStatus").textContent = "⏳ AI 教練分析中…";
+  try {
+    const all = await idbAll("exercises");
+    const today = todayStr();
+    const t = all.filter((e) => e.date === today);
+    const recent = all.filter((e) => e.date !== today).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 15);
+    const h = await idbGet("health", today);
+    const prompt = "你是專業健身教練兼營養師。以下是我今天的資料:\n"
+      + "【今日運動】" + (t.length ? t.map((e) => e.type + ":" + e.desc).join(";") : "還沒運動") + "\n"
+      + "【近期運動】" + (recent.length ? recent.map((e) => e.date.slice(5) + " " + e.type + ":" + e.desc).join(";") : "無紀錄") + "\n"
+      + (h && h.activeEnergy != null ? "【今日活動消耗】" + Math.round(h.activeEnergy) + " kcal\n" : "")
+      + "【飲食狀況】" + await buildDietContext() + "\n"
+      + "請用繁體中文回覆,不要用任何 markdown 符號,分三段,各段以下列標題開頭:\n"
+      + "訓練評語:(2-3句,評今天的訓練安排與強度,搭配近期紀錄給下次建議)\n"
+      + "營養缺口:(用具體數字說明今天蛋白質、碳水、脂肪、熱量各還差多少)\n"
+      + "下一餐建議:(考慮運動內容與缺口,給出具體餐點與份量,例如便利商店或自助餐怎麼買)";
+    const text = (await geminiText(key, prompt)).trim();
+    $("coachOutput").textContent = text;
+    $("coachStatus").textContent = "";
+    await idbPut("coach", { date: today, ts: Date.now(), text });
+    renderGym();
+  } catch (err) {
+    $("coachStatus").textContent = "❌ " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 /* ==================================================
    重訓計時
 ================================================== */
@@ -706,6 +837,7 @@ $("gymMainBtn").addEventListener("click", () => {
     keepAwake(true);
   }
   updateGymUI();
+  renderGym();
   renderGymLog();
 });
 $("gymFinishBtn").addEventListener("click", async () => {
@@ -773,7 +905,7 @@ $("exportBtn").addEventListener("click", async () => {
 });
 $("wipeBtn").addEventListener("click", async () => {
   if (!confirm("確定要刪除所有資料?此動作無法復原。")) return;
-  await Promise.all([idbClear("meals"), idbClear("health"), idbClear("workouts"), idbClear("hkworkouts")]);
+  await Promise.all([idbClear("meals"), idbClear("health"), idbClear("workouts"), idbClear("hkworkouts"), idbClear("exercises"), idbClear("coach")]);
   localStorage.removeItem("ft_settings");
   localStorage.removeItem("ft_apikey");
   loadSettingsUI();
