@@ -286,6 +286,12 @@ async function renderFood() {
   const allMeals = await idbAll("meals");
   const meals = allMeals.filter((m) => m.date === todayStr());
   renderHistory(allMeals, s);
+  try {
+    if ($("dietCoachOut") && !$("dietCoachOut").textContent) {
+      const notes = (await idbAll("coach")).filter((c) => c.date === todayStr() && c.kind === "diet").sort((a, b) => b.ts - a.ts);
+      if (notes.length) $("dietCoachOut").textContent = notes[0].text;
+    }
+  } catch (e) {}
   const sum = (k) => meals.reduce((a, m) => a + (Number(m[k]) || 0), 0);
   const cal = sum("calories"), remaining = s.budget - cal;
 
@@ -391,6 +397,32 @@ function renderHistory(allMeals, s) {
   el.innerHTML = html;
 }
 
+/* ---------- AI 營養師:今日飲食總評 ---------- */
+$("dietCoachBtn").addEventListener("click", async () => {
+  const key = getApiKey();
+  if (!key) { $("dietCoachStatus").textContent = "請先到「設定」貼上 Gemini API Key。"; return; }
+  const btn = $("dietCoachBtn");
+  btn.disabled = true;
+  $("dietCoachStatus").textContent = "AI 營養師分析中…";
+  try {
+    const ex = (await idbAll("exercises")).filter((e) => e.date === todayStr());
+    const prompt = "你是專業營養師。以下是我今天的狀況:\n"
+      + "【飲食】" + await buildDietContext() + "\n"
+      + "【今日運動】" + (ex.length ? ex.map((e) => e.type + ":" + e.desc).join(";") : "還沒運動") + "\n"
+      + "請用繁體中文回覆,不要用任何 markdown 符號,分兩段,各段以下列標題開頭:\n"
+      + "飲食評語:(今天吃得如何?品質、蛋白質夠不夠、精緻碳水與油脂比例,2-3 句,語氣像朋友)\n"
+      + "接下來建議:(今天剩下的餐具體怎麼吃,給實際餐點與份量,例如便利商店或自助餐怎麼買)";
+    const text = (await geminiText(key, prompt)).trim();
+    $("dietCoachOut").textContent = text;
+    $("dietCoachStatus").textContent = "";
+    await idbPut("coach", { date: todayStr(), ts: Date.now(), text, kind: "diet" });
+  } catch (err) {
+    $("dietCoachStatus").textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 /* ---------- 新增一餐 ---------- */
 function renderMealTypeSeg() {
   $("mealTypeSeg").innerHTML = MEAL_TYPES.map((t) =>
@@ -410,7 +442,9 @@ $("addMealBtn").addEventListener("click", () => {
   $("mealSaveBtn").disabled = true;
   ["rName", "rCal", "rCarb", "rProtein", "rFat"].forEach((id) => { $(id).value = ""; });
   $("rAdvice").textContent = "";
+  $("descInput").value = "";
   $("mealDialog").showModal();
+  setTimeout(() => { try { document.activeElement.blur(); } catch (e) {} }, 60);
 });
 $("mealCancelBtn").addEventListener("click", () => $("mealDialog").close());
 $("takePhotoBtn").addEventListener("click", () => $("mealPhoto").click());
@@ -458,16 +492,18 @@ $("fixBtn").addEventListener("click", () => {
 });
 
 async function runAnalysis() {
-  if (!mealImage) { $("mealError").textContent = "請先拍照或選一張餐點照片。"; return; }
+  const desc = $("descInput").value.trim();
+  if (!mealImage && !desc) { $("mealError").textContent = "請先拍照、選照片,或用文字描述你吃了什麼。"; return; }
   const key = getApiKey();
-  if (!key) { $("mealError").textContent = "請先到「設定」貼上 Gemini API Key(免費申請),或改用手動輸入。注意:主畫面 App 和 Safari 的儲存是分開的,Key 要在這個 App 裡貼。"; return; }
+  if (!key) { $("mealError").textContent = "請先到「設定」貼上 Gemini API Key(免費申請),或改用手動輸入。"; return; }
   const btn = $("analyzeBtn");
-  btn.disabled = true; $("fixBtn").disabled = true;
+  btn.disabled = true; $("fixBtn").disabled = true; $("descBtn").disabled = true;
   btn.textContent = "AI 分析中…";
+  $("descBtn").textContent = "AI 估算中…";
   $("mealError").textContent = "";
   try {
     const ctx = await buildDietContext();
-    const r = await analyzeMeal(mealImage.base64, key, ctx, mealCorrections);
+    const r = await analyzeMeal(mealImage ? mealImage.base64 : null, desc, key, ctx, mealCorrections);
     $("rName").value = r.name;
     $("rCal").value = Math.round(r.calories);
     $("rCarb").value = Math.round(r.carbs);
@@ -479,10 +515,12 @@ async function runAnalysis() {
   } catch (err) {
     $("mealError").textContent = err.message;
   } finally {
-    btn.disabled = false; $("fixBtn").disabled = false;
+    btn.disabled = false; $("fixBtn").disabled = false; $("descBtn").disabled = false;
     btn.textContent = "AI 分析熱量";
+    $("descBtn").textContent = "AI 用文字估算";
   }
 }
+$("descBtn").addEventListener("click", () => runAnalysis());
 
 /* 本地「記憶」:把近況整理成摘要一起給 AI,記憶本體只存在此裝置 */
 async function buildDietContext() {
@@ -573,14 +611,20 @@ function extractJson(text) {
   if (a >= 0 && b > a) text = text.slice(a, b + 1);
   return JSON.parse(text);
 }
-async function analyzeMeal(base64, key, ctx, corrections) {
-  let prompt = '你是專業營養師。請分析這張餐點照片,估算整份餐點的營養成分。請「只」回傳以下格式的 JSON,不要加任何其他文字:{"name":"餐點名稱(繁體中文)","calories":數字,"carbs":數字,"protein":數字,"fat":數字,"advice":"一到兩句繁體中文的飲食建議"}。calories 單位 kcal,carbs/protein/fat 單位公克。如果照片不是食物,name 填「非食物」,數值全填 0。'
-    + "\n如果照片是有包裝的市售商品或連鎖店餐點(例如 7-11、全家、麥當勞、星巴克),請先用搜尋查該商品的官方營養標示,以官方標示數字為準,name 用商品正式名稱。";
+async function analyzeMeal(base64, desc, key, ctx, corrections) {
+  let prompt = (base64
+    ? '你是專業營養師。請分析這張餐點照片,估算整份餐點的營養成分。'
+    : '你是專業營養師。使用者沒有拍照,請根據他的文字描述,用常見份量估算這一餐的營養成分。')
+    + '請「只」回傳以下格式的 JSON,不要加任何其他文字:{"name":"餐點名稱(繁體中文)","calories":數字,"carbs":數字,"protein":數字,"fat":數字,"advice":"一到兩句繁體中文的飲食建議"}。calories 單位 kcal,carbs/protein/fat 單位公克。如果內容不是食物,name 填「非食物」,數值全填 0。'
+    + "\n如果是有包裝的市售商品或連鎖店餐點(例如 7-11、全家、麥當勞、拿坡里、星巴克),請先用搜尋查該商品的官方營養標示,以官方標示數字為準,name 用商品正式名稱。";
+  if (desc) prompt += (base64 ? "\n使用者補充說明:" : "\n他吃的內容:") + desc;
   if (ctx) prompt += "\n使用者近況(寫 advice 時參考):\n" + ctx;
   if (corrections && corrections.length) {
     prompt += "\n使用者對前次估算的補充修正,請完全以這些補充為準重新估算:\n- " + corrections.join("\n- ");
   }
-  const contents = [{ parts: [{ text: prompt }, { inline_data: { mime_type: "image/jpeg", data: base64 } }] }];
+  const parts = [{ text: prompt }];
+  if (base64) parts.push({ inline_data: { mime_type: "image/jpeg", data: base64 } });
+  const contents = [{ parts }];
   let text;
   try {
     // 先試帶 Google 搜尋(可查官方營養標示)
