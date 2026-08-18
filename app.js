@@ -20,13 +20,38 @@ const fmtMin = (sec) => {
 };
 
 /* ============ 設定(localStorage) ============ */
-const DEFAULTS = { budget: 2000, carb: 250, protein: 120, fat: 65, rest: 90 };
+const DEFAULTS = { budget: 2000, budgetTrain: 2200, budgetCardio: 2000, budgetRest: 1800, carb: 250, protein: 120, fat: 65, rest: 90 };
 function getSettings() {
   try { return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem("ft_settings") || "{}")); }
   catch (e) { return Object.assign({}, DEFAULTS); }
 }
 function saveSettings(s) { localStorage.setItem("ft_settings", JSON.stringify(s)); }
 const getApiKey = () => { try { return localStorage.getItem("ft_apikey") || ""; } catch (e) { return ""; } };
+
+/* ---- 當日型態(重訓/有氧/休息)與對應目標 ---- */
+const DAY_TYPE_NAMES = { train: "重訓日", cardio: "有氧日", rest: "休息日" };
+function dayTypeFor(date) {
+  try { const m = JSON.parse(localStorage.getItem("ft_daytypes") || "{}"); return m[date] || "cardio"; }
+  catch (e) { return "cardio"; }
+}
+function setDayType(date, type) {
+  try { const m = JSON.parse(localStorage.getItem("ft_daytypes") || "{}"); m[date] = type; localStorage.setItem("ft_daytypes", JSON.stringify(m)); }
+  catch (e) {}
+}
+function effectiveTargets(s, type) {
+  const map = { train: s.budgetTrain, cardio: s.budgetCardio, rest: s.budgetRest };
+  const budget = Number(map[type]) || Number(s.budgetCardio) || 2000;
+  const f = budget / (Number(s.budgetTrain) || budget || 1);
+  return { budget, carb: Math.round(s.carb * f), protein: s.protein, fat: Math.round(s.fat * f) };
+}
+function renderDayTypeSeg(active) {
+  const el = $("dayTypeSeg");
+  if (!el) return;
+  el.innerHTML = ["train", "cardio", "rest"].map((k) =>
+    '<button type="button" class="' + (k === active ? "on" : "") + '" data-k="' + k + '">' + DAY_TYPE_NAMES[k] + "</button>").join("");
+  el.querySelectorAll("button").forEach((b) =>
+    b.addEventListener("click", () => { setDayType(todayStr(), b.dataset.k); renderFood(); }));
+}
 
 /* ============ IndexedDB ============ */
 let db = null;
@@ -268,6 +293,8 @@ $("importFile").addEventListener("change", async (e) => {
 const MEAL_TYPES = ["早餐", "午餐", "晚餐", "點心"];
 let mealImage = null; // {dataUrl, base64}
 let mealCorrections = []; // 使用者對估算的補充修正
+let editingMealId = null;      // 編輯既有紀錄時的 id
+let lastAnalysisItems = [];    // 這次分析的單項明細
 let currentMealType = defaultMealType();
 function defaultMealType() {
   const h = new Date().getHours();
@@ -283,6 +310,9 @@ async function todayMeals() {
 }
 async function renderFood() {
   const s = getSettings();
+  const dt = dayTypeFor(todayStr());
+  const t = effectiveTargets(s, dt);
+  renderDayTypeSeg(dt);
   const allMeals = await idbAll("meals");
   const meals = allMeals.filter((m) => m.date === todayStr());
   renderHistory(allMeals, s);
@@ -293,22 +323,22 @@ async function renderFood() {
     }
   } catch (e) {}
   const sum = (k) => meals.reduce((a, m) => a + (Number(m[k]) || 0), 0);
-  const cal = sum("calories"), remaining = s.budget - cal;
+  const cal = sum("calories"), remaining = t.budget - cal;
 
   const C = 490;
-  const ratio = Math.min(cal / Math.max(s.budget, 1), 1);
+  const ratio = Math.min(cal / Math.max(t.budget, 1), 1);
   const ring = $("budgetRing");
   ring.setAttribute("stroke-dashoffset", String(C * (1 - ratio)));
   ring.setAttribute("stroke", remaining >= 0 ? "var(--green)" : "var(--red)");
   $("ringTitle").textContent = remaining >= 0 ? "還可以吃" : "已超過";
   $("ringValue").textContent = String(Math.abs(Math.round(remaining)));
   $("ringValue").style.color = remaining >= 0 ? "" : "var(--red)";
-  $("budgetSummary").textContent = "今日額度 " + s.budget + " kcal・已吃 " + Math.round(cal) + " kcal";
+  $("budgetSummary").textContent = DAY_TYPE_NAMES[dt] + "額度 " + t.budget + " kcal・已吃 " + Math.round(cal) + " kcal";
 
   const macros = [
-    ["碳水", sum("carbs"), s.carb, "var(--orange)"],
-    ["蛋白質", sum("protein"), s.protein, "var(--blue)"],
-    ["脂肪", sum("fat"), s.fat, "var(--ochre)"],
+    ["碳水", sum("carbs"), t.carb, "var(--orange)"],
+    ["蛋白質", sum("protein"), t.protein, "var(--blue)"],
+    ["脂肪", sum("fat"), t.fat, "var(--ochre)"],
   ];
   $("macroRow").innerHTML = macros.map(([t, v, target, color]) =>
     `<div class="macro"><div class="sub small">${t}</div><b>${Math.round(v)}g</b>
@@ -324,9 +354,11 @@ async function renderFood() {
         <div class="grow">
           <div class="name">${m.mealType}・${escapeHtml(m.name)}</div>
           <div class="detail">碳 ${Math.round(m.carbs)}g・蛋 ${Math.round(m.protein)}g・脂 ${Math.round(m.fat)}g</div>
+          ${m.items && m.items.length ? `<div class="detail">${m.items.map((i) => escapeHtml(i.name) + " " + Math.round(i.calories)).join("・")} kcal</div>` : ""}
           ${m.advice ? `<div class="advice">${escapeHtml(m.advice)}</div>` : ""}
         </div>
         <div><div class="kcal">${Math.round(m.calories)} kcal</div>
+        <button class="secondary" style="padding:4px 10px; font-size:12px; margin-top:4px" onclick="editMeal(${m.id})">編輯</button>
         <button class="secondary" style="padding:4px 10px; font-size:12px; margin-top:4px" onclick="deleteMeal(${m.id})">刪除</button></div>
       </div>`
     ).join("");
@@ -369,13 +401,14 @@ function renderHistory(allMeals, s) {
   }
   const sumK = (arr, k) => arr.reduce((a, m) => a + (Number(m[k]) || 0), 0);
   const avg = Math.round(days.reduce((a, d) => a + sumK(byDay[d], "calories"), 0) / days.length);
-  let html = '<p class="sub small" style="margin:2px 0 8px">近 ' + days.length + ' 天平均每日 <b>' + avg + '</b> kcal・額度 ' + s.budget + ' kcal</p>';
+  let html = '<p class="sub small" style="margin:2px 0 8px">近 ' + days.length + ' 天平均每日 <b>' + avg + '</b> kcal</p>';
   for (const d of days) {
     const arr = byDay[d].sort((a, b) => a.ts - b.ts);
     const cal = Math.round(sumK(arr, "calories"));
-    const over = cal > s.budget;
+    const dayBudget = effectiveTargets(s, dayTypeFor(d)).budget;
+    const over = cal > dayBudget;
     const open = expandedDays.has(d);
-    const pct = Math.min(cal / Math.max(s.budget, 1) * 100, 100);
+    const pct = Math.min(cal / Math.max(dayBudget, 1) * 100, 100);
     html += '<div class="listitem" style="cursor:pointer" onclick="toggleDay(\'' + d + '\')">'
       + '<div class="grow"><div class="name"><span id="arrow-' + d + '">' + (open ? "▾" : "▸") + '</span> '
       + d.slice(5).replace("-", "/") + "(" + weekdayName(d) + ")"
@@ -430,7 +463,37 @@ function renderMealTypeSeg() {
   $("mealTypeSeg").querySelectorAll("button").forEach((b) =>
     b.addEventListener("click", () => { currentMealType = b.dataset.t; renderMealTypeSeg(); }));
 }
+window.editMeal = async (id) => {
+  const m = await idbGet("meals", id);
+  if (!m) return;
+  editingMealId = id;
+  mealImage = m.thumb ? { dataUrl: m.thumb, base64: m.thumb.split(",")[1] } : null;
+  mealCorrections = [];
+  lastAnalysisItems = m.items || [];
+  currentMealType = m.mealType;
+  renderMealTypeSeg();
+  $("mealPreview").src = m.thumb || "";
+  $("mealPreview").style.display = m.thumb ? "block" : "none";
+  $("analyzeBtn").style.display = m.thumb ? "block" : "none";
+  $("mealError").textContent = "";
+  $("descInput").value = "";
+  $("rName").value = m.name;
+  $("rCal").value = Math.round(m.calories);
+  $("rCarb").value = Math.round(m.carbs);
+  $("rProtein").value = Math.round(m.protein);
+  $("rFat").value = Math.round(m.fat);
+  $("rAdvice").textContent = m.advice || "";
+  $("rItems").textContent = lastAnalysisItems.length ? "明細:" + lastAnalysisItems.map((i) => i.name + " " + Math.round(i.calories) + "kcal").join("、") : "";
+  $("mealResult").style.display = "block";
+  $("mealSaveBtn").disabled = false;
+  $("mealDialog").showModal();
+  setTimeout(() => { try { document.activeElement.blur(); } catch (e) {} }, 60);
+};
+
 $("addMealBtn").addEventListener("click", () => {
+  editingMealId = null;
+  lastAnalysisItems = [];
+  $("rItems").textContent = "";
   mealImage = null;
   mealCorrections = [];
   currentMealType = defaultMealType();
@@ -453,7 +516,7 @@ $("pickPhotoBtn").addEventListener("click", () => $("mealAlbum").click());
   inp.addEventListener("change", async (e) => {
     const f = e.target.files[0];
     if (!f) return;
-    mealImage = await resizeImage(f, 1024);
+    mealImage = await resizeImage(f, 768);
     mealCorrections = [];
     $("mealPreview").src = mealImage.dataUrl;
     $("mealPreview").style.display = "block";
@@ -470,7 +533,7 @@ function resizeImage(file, maxDim) {
       canvas.width = Math.round(img.width * scale);
       canvas.height = Math.round(img.height * scale);
       canvas.getContext("2d").drawImage(img, 0, 0, canvas.width, canvas.height);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.7);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.62);
       URL.revokeObjectURL(url);
       resolve({ dataUrl, base64: dataUrl.split(",")[1] });
     };
@@ -503,13 +566,33 @@ async function runAnalysis() {
   $("mealError").textContent = "";
   try {
     const ctx = await buildDietContext();
-    const r = await analyzeMeal(mealImage ? mealImage.base64 : null, desc, key, ctx, mealCorrections);
+    let r = null, lastErr = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        r = await analyzeMeal(mealImage ? mealImage.base64 : null, desc, key, ctx, mealCorrections);
+        lastErr = null;
+        break;
+      } catch (e) {
+        lastErr = e;
+        if (!(e.status === 503 || e.status === 500 || e.status === 429)) break;
+        if (attempt < 3) {
+          $("mealError").textContent = "伺服器忙碌,自動重試中(" + attempt + "/3)…請不要關閉畫面";
+          await new Promise((res) => setTimeout(res, 1800));
+        }
+      }
+    }
+    if (lastErr) throw lastErr;
+    lastAnalysisItems = r.items || [];
     $("rName").value = r.name;
     $("rCal").value = Math.round(r.calories);
     $("rCarb").value = Math.round(r.carbs);
     $("rProtein").value = Math.round(r.protein);
     $("rFat").value = Math.round(r.fat);
     $("rAdvice").textContent = r.advice || "";
+    $("rItems").textContent = lastAnalysisItems.length
+      ? "明細:" + lastAnalysisItems.map((i) => i.name + " " + Math.round(i.calories) + "kcal(蛋白 " + Math.round(i.protein) + "g)").join("、")
+      : "";
+    $("mealError").textContent = "";
     $("mealResult").style.display = "block";
     $("mealSaveBtn").disabled = false;
   } catch (err) {
@@ -526,15 +609,17 @@ $("descBtn").addEventListener("click", () => runAnalysis());
 async function buildDietContext() {
   try {
     const s = getSettings();
+    const dt = dayTypeFor(todayStr());
+    const t = effectiveTargets(s, dt);
     const all = await idbAll("meals");
     const today = todayStr();
     const tMeals = all.filter((m) => m.date === today);
     const sum = (arr, k) => arr.reduce((a, m) => a + (Number(m[k]) || 0), 0);
     const cal = sum(tMeals, "calories");
-    let ctx = "今日已吃 " + Math.round(cal) + " kcal(額度 " + s.budget + ",剩 " + Math.round(s.budget - cal) + ")"
-      + ";碳水 " + Math.round(sum(tMeals, "carbs")) + "/" + s.carb + "g"
-      + ";蛋白質 " + Math.round(sum(tMeals, "protein")) + "/" + s.protein + "g"
-      + ";脂肪 " + Math.round(sum(tMeals, "fat")) + "/" + s.fat + "g。";
+    let ctx = "今天是" + DAY_TYPE_NAMES[dt] + "。已吃 " + Math.round(cal) + " kcal(額度 " + t.budget + ",剩 " + Math.round(t.budget - cal) + ")"
+      + ";碳水 " + Math.round(sum(tMeals, "carbs")) + "/" + t.carb + "g"
+      + ";蛋白質 " + Math.round(sum(tMeals, "protein")) + "/" + t.protein + "g"
+      + ";脂肪 " + Math.round(sum(tMeals, "fat")) + "/" + t.fat + "g。";
     if (tMeals.length) ctx += "今天已吃:" + tMeals.map((m) => m.mealType + " " + m.name + "(" + Math.round(m.calories) + "kcal)").join("、") + "。";
     const days = {};
     all.forEach((m) => { if (m.date !== today) { days[m.date] = (days[m.date] || 0) + (Number(m.calories) || 0); } });
@@ -615,7 +700,7 @@ async function analyzeMeal(base64, desc, key, ctx, corrections) {
   let prompt = (base64
     ? '你是專業營養師。請分析這張餐點照片,估算整份餐點的營養成分。'
     : '你是專業營養師。使用者沒有拍照,請根據他的文字描述,用常見份量估算這一餐的營養成分。')
-    + '請「只」回傳以下格式的 JSON,不要加任何其他文字:{"name":"餐點名稱(繁體中文)","calories":數字,"carbs":數字,"protein":數字,"fat":數字,"advice":"一到兩句繁體中文的飲食建議"}。calories 單位 kcal,carbs/protein/fat 單位公克。如果內容不是食物,name 填「非食物」,數值全填 0。'
+    + '請「只」回傳以下格式的 JSON,不要加任何其他文字:{"name":"整餐名稱(繁體中文)","items":[{"name":"單項食物或飲料名","calories":數字,"carbs":數字,"protein":數字,"fat":數字}],"calories":整餐總熱量,"carbs":數字,"protein":數字,"fat":數字,"advice":"一到兩句繁體中文的飲食建議"}。items 請把每樣食物/飲料分開列(例如三明治一項、拿鐵一項),讓使用者看出哪樣是熱量炸彈。calories 單位 kcal,carbs/protein/fat 單位公克。如果內容不是食物,name 填「非食物」,數值全填 0。'
     + "\n如果是有包裝的市售商品或連鎖店餐點(例如 7-11、全家、麥當勞、拿坡里、星巴克),請先用搜尋查該商品的官方營養標示,以官方標示數字為準,name 用商品正式名稱。";
   if (desc) prompt += (base64 ? "\n使用者補充說明:" : "\n他吃的內容:") + desc;
   if (ctx) prompt += "\n使用者近況(寫 advice 時參考):\n" + ctx;
@@ -644,12 +729,18 @@ async function analyzeMeal(base64, desc, key, ctx, corrections) {
     protein: Number(r.protein) || 0,
     fat: Number(r.fat) || 0,
     advice: String(r.advice || ""),
+    items: Array.isArray(r.items) ? r.items.map((i) => ({
+      name: String(i.name || ""),
+      calories: Number(i.calories) || 0,
+      carbs: Number(i.carbs) || 0,
+      protein: Number(i.protein) || 0,
+      fat: Number(i.fat) || 0,
+    })) : [],
   };
 }
 $("mealSaveBtn").addEventListener("click", async () => {
   let thumb = null;
-  if (mealImage) {
-    // 縮小成清單縮圖以節省空間
+  if (mealImage && !editingMealId) {
     const img = new Image();
     img.src = mealImage.dataUrl;
     await new Promise((r) => { img.onload = r; });
@@ -659,21 +750,31 @@ $("mealSaveBtn").addEventListener("click", async () => {
     c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
     thumb = c.toDataURL("image/jpeg", 0.55);
   }
-  await idbPut("meals", {
-    date: todayStr(), ts: Date.now(), mealType: currentMealType,
+  const fields = {
+    mealType: currentMealType,
     name: $("rName").value || "餐點",
     calories: Number($("rCal").value) || 0,
     carbs: Number($("rCarb").value) || 0,
     protein: Number($("rProtein").value) || 0,
     fat: Number($("rFat").value) || 0,
     advice: $("rAdvice").textContent || "",
-    thumb,
-  });
+    items: lastAnalysisItems,
+  };
+  if (editingMealId) {
+    const m = await idbGet("meals", editingMealId);
+    if (m) {
+      Object.assign(m, fields);
+      await idbPut("meals", m);
+    }
+    toast("已更新!");
+  } else {
+    await idbPut("meals", Object.assign({ date: todayStr(), ts: Date.now(), thumb }, fields));
+    toast("已記錄!");
+  }
+  editingMealId = null;
   $("mealDialog").close();
-  toast("已記錄!");
   renderFood();
 });
-
 
 /* ==================================================
    運動紀錄 + AI 教練
@@ -948,13 +1049,19 @@ $("gymFinishBtn").addEventListener("click", async () => {
 ================================================== */
 function loadSettingsUI() {
   const s = getSettings();
-  $("sBudget").value = s.budget; $("sCarb").value = s.carb;
+  $("sBudgetTrain").value = s.budgetTrain;
+  $("sBudgetCardio").value = s.budgetCardio;
+  $("sBudgetRest").value = s.budgetRest;
+  $("sCarb").value = s.carb;
   $("sProtein").value = s.protein; $("sFat").value = s.fat; $("sRest").value = s.rest;
   $("sApiKey").value = getApiKey();
 }
 $("sSaveBtn").addEventListener("click", () => {
   saveSettings({
-    budget: Number($("sBudget").value) || DEFAULTS.budget,
+    budget: Number($("sBudgetCardio").value) || DEFAULTS.budget,
+    budgetTrain: Number($("sBudgetTrain").value) || DEFAULTS.budgetTrain,
+    budgetCardio: Number($("sBudgetCardio").value) || DEFAULTS.budgetCardio,
+    budgetRest: Number($("sBudgetRest").value) || DEFAULTS.budgetRest,
     carb: Number($("sCarb").value) || DEFAULTS.carb,
     protein: Number($("sProtein").value) || DEFAULTS.protein,
     fat: Number($("sFat").value) || DEFAULTS.fat,
