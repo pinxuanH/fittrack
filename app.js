@@ -557,6 +557,7 @@ async function geminiRequestText(key, body) {
     const err = new Error(
       resp.status === 403 || resp.status === 401 ? "API Key 可能有誤(HTTP " + resp.status + ")" :
       resp.status === 429 ? "AI 額度暫時用完(HTTP 429)。等 1-2 分鐘再試,或改用手動輸入。若一直發生,請確認 API Key 與你的 Google AI Pro 訂閱是同一個 Google 帳號。" :
+      resp.status === 404 ? "找不到可用模型(HTTP 404)。請到「設定」按「測試 API 連線」,把結果截圖回報。" :
       "AI 分析失敗(HTTP " + resp.status + ")");
     err.status = resp.status;
     throw err;
@@ -584,7 +585,7 @@ async function analyzeMeal(base64, key, ctx, corrections) {
     // 先試帶 Google 搜尋(可查官方營養標示)
     text = await geminiRequestText(key, { contents, generationConfig: { temperature: 0.2 }, tools: [{ google_search: {} }] });
   } catch (e) {
-    if (e && (e.status === 400 || e.status === 429)) {
+    if (e && (e.status === 400 || e.status === 404 || e.status === 429)) {
       // 帳號/模型不支援搜尋 → 退回一般模式
       text = await geminiRequestText(key, { contents, generationConfig: { temperature: 0.2, response_mime_type: "application/json" } });
     } else { throw e; }
@@ -927,6 +928,38 @@ $("sApiSaveBtn").addEventListener("click", () => {
     alert("儲存失敗!瀏覽器可能封鎖了網站資料。請確認:1) 不是私密瀏覽 2) iPhone 設定 → Safari →「阻擋所有 Cookie」要關閉。");
   }
 });
+$("apiTestBtn").addEventListener("click", async () => {
+  const key = getApiKey();
+  const out = $("apiTestOut");
+  if (!key) { out.textContent = "尚未儲存 API Key。"; return; }
+  out.textContent = "測試中…";
+  const lines = [];
+  try {
+    const r = await fetch("https://generativelanguage.googleapis.com/v1beta/models?pageSize=200", {
+      headers: { "x-goog-api-key": key },
+    });
+    lines.push("模型清單:HTTP " + r.status);
+    if (r.ok) {
+      const j = await r.json();
+      const names = (j.models || [])
+        .filter((m) => (m.supportedGenerationMethods || []).includes("generateContent"))
+        .map((m) => m.name.replace(/^models\//, ""));
+      lines.push("你的 Key 可用模型 " + names.length + " 個:");
+      lines.push(names.slice(0, 8).join("\n") + (names.length > 8 ? "\n…" : ""));
+    } else {
+      lines.push((await r.text()).slice(0, 200));
+    }
+  } catch (e) { lines.push("模型清單:連線失敗 " + e.message); }
+  for (const m of MODEL_CANDIDATES) {
+    try {
+      const r = await geminiCall(m, key, { contents: [{ parts: [{ text: "hi" }] }] });
+      lines.push(m + " → HTTP " + r.status + (r.ok ? " ✓" : ""));
+    } catch (e) { lines.push(m + " → 連線失敗"); }
+    out.textContent = lines.join("\n");
+  }
+  out.textContent = lines.join("\n") + "\n\n把這個結果截圖回報,即可對症修正。";
+});
+
 $("exportBtn").addEventListener("click", async () => {
   const data = {
     exportedAt: new Date().toISOString(),
