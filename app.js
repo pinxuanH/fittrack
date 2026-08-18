@@ -251,11 +251,11 @@ $("importFile").addEventListener("change", async (e) => {
     workouts.sort((a, b) => b.date.localeCompare(a.date));
     for (const w of workouts.slice(0, 50)) await idbPut("hkworkouts", w);
 
-    status.textContent = "✅ 完成!匯入 " + count + " 天的數據、" + workouts.length + " 次訓練。";
+    status.textContent = "完成!匯入 " + count + " 天的數據、" + workouts.length + " 次訓練。";
     toast("匯入完成");
     renderHealth();
   } catch (err) {
-    status.textContent = "❌ 解析失敗:" + err.message;
+    status.textContent = "解析失敗:" + err.message;
   } finally {
     prog.style.display = "none";
     e.target.value = "";
@@ -302,7 +302,7 @@ async function renderFood() {
   const macros = [
     ["碳水", sum("carbs"), s.carb, "var(--orange)"],
     ["蛋白質", sum("protein"), s.protein, "var(--blue)"],
-    ["脂肪", sum("fat"), s.fat, "#eab308"],
+    ["脂肪", sum("fat"), s.fat, "var(--ochre)"],
   ];
   $("macroRow").innerHTML = macros.map(([t, v, target, color]) =>
     `<div class="macro"><div class="sub small">${t}</div><b>${Math.round(v)}g</b>
@@ -314,7 +314,7 @@ async function renderFood() {
   $("mealList").innerHTML = meals.length === 0 ? '<p class="sub small">還沒有紀錄,按上面「記錄一餐」吧!</p>' :
     meals.map((m) =>
       `<div class="listitem">
-        ${m.thumb ? `<img src="${m.thumb}" alt="">` : '<span style="font-size:34px">🍽</span>'}
+        ${m.thumb ? `<img src="${m.thumb}" alt="">` : '<span class="noimg">無圖</span>'}
         <div class="grow">
           <div class="name">${m.mealType}・${escapeHtml(m.name)}</div>
           <div class="detail">碳 ${Math.round(m.carbs)}g・蛋 ${Math.round(m.protein)}g・脂 ${Math.round(m.fat)}g</div>
@@ -381,7 +381,7 @@ function renderHistory(allMeals, s) {
       + '<div id="day-' + d + '" style="display:' + (open ? "block" : "none") + '; padding-left:10px">'
       + arr.map((m) =>
           '<div class="listitem">'
-          + (m.thumb ? '<img src="' + m.thumb + '" alt="">' : '<span style="font-size:26px">🍽</span>')
+          + (m.thumb ? '<img src="' + m.thumb + '" alt="">' : '<span class="noimg">無圖</span>')
           + '<div class="grow"><div class="name" style="font-size:13px">' + m.mealType + '・' + escapeHtml(m.name) + '</div>'
           + '<div class="detail">碳 ' + Math.round(m.carbs) + 'g・蛋 ' + Math.round(m.protein) + 'g・脂 ' + Math.round(m.fat) + 'g</div></div>'
           + '<div class="kcal">' + Math.round(m.calories) + ' kcal</div></div>'
@@ -463,7 +463,7 @@ async function runAnalysis() {
   if (!key) { $("mealError").textContent = "請先到「設定」貼上 Gemini API Key(免費申請),或改用手動輸入。注意:主畫面 App 和 Safari 的儲存是分開的,Key 要在這個 App 裡貼。"; return; }
   const btn = $("analyzeBtn");
   btn.disabled = true; $("fixBtn").disabled = true;
-  btn.textContent = "⏳ AI 分析中…";
+  btn.textContent = "AI 分析中…";
   $("mealError").textContent = "";
   try {
     const ctx = await buildDietContext();
@@ -480,7 +480,7 @@ async function runAnalysis() {
     $("mealError").textContent = err.message;
   } finally {
     btn.disabled = false; $("fixBtn").disabled = false;
-    btn.textContent = "✨ AI 分析熱量";
+    btn.textContent = "AI 分析熱量";
   }
 }
 
@@ -539,10 +539,11 @@ async function geminiRequestText(key, body) {
   let candidates = MODEL_CANDIDATES.slice();
   if (cached) candidates = [cached].concat(candidates.filter((m) => m !== cached));
   let resp = null;
+  let lastResp = null;
   for (const model of candidates) {
     try { resp = await geminiCall(model, key, body); }
     catch (e) { throw new Error("連線失敗,請確認網路。"); }
-    if (resp.status === 404) { resp = null; continue; }
+    if (resp.status === 404 || resp.status === 429) { lastResp = resp; resp = null; continue; }
     if (resp.ok) localStorage.setItem("ft_model", model);
     break;
   }
@@ -550,11 +551,12 @@ async function geminiRequestText(key, body) {
     const found = await listFlashModel(key);
     if (found) { resp = await geminiCall(found, key, body); if (resp.ok) localStorage.setItem("ft_model", found); }
   }
+  if (!resp && lastResp) resp = lastResp;
   if (!resp) throw new Error("目前找不到可用的 Gemini 模型,請稍後再試。");
   if (!resp.ok) {
     const err = new Error(
       resp.status === 403 || resp.status === 401 ? "API Key 可能有誤(HTTP " + resp.status + ")" :
-      resp.status === 429 ? "已達免費額度上限,請稍後再試或手動輸入。" :
+      resp.status === 429 ? "AI 額度暫時用完(HTTP 429)。等 1-2 分鐘再試,或改用手動輸入。若一直發生,請確認 API Key 與你的 Google AI Pro 訂閱是同一個 Google 帳號。" :
       "AI 分析失敗(HTTP " + resp.status + ")");
     err.status = resp.status;
     throw err;
@@ -582,7 +584,7 @@ async function analyzeMeal(base64, key, ctx, corrections) {
     // 先試帶 Google 搜尋(可查官方營養標示)
     text = await geminiRequestText(key, { contents, generationConfig: { temperature: 0.2 }, tools: [{ google_search: {} }] });
   } catch (e) {
-    if (e && e.status === 400) {
+    if (e && (e.status === 400 || e.status === 429)) {
       // 帳號/模型不支援搜尋 → 退回一般模式
       text = await geminiRequestText(key, { contents, generationConfig: { temperature: 0.2, response_mime_type: "application/json" } });
     } else { throw e; }
@@ -699,10 +701,11 @@ async function geminiText(key, prompt) {
   let candidates = MODEL_CANDIDATES.slice();
   if (cached) candidates = [cached].concat(candidates.filter((m) => m !== cached));
   let resp = null;
+  let lastResp = null;
   for (const model of candidates) {
     try { resp = await geminiCall(model, key, body); }
     catch (e) { throw new Error("連線失敗,請確認網路。"); }
-    if (resp.status === 404) { resp = null; continue; }
+    if (resp.status === 404 || resp.status === 429) { lastResp = resp; resp = null; continue; }
     if (resp.ok) localStorage.setItem("ft_model", model);
     break;
   }
@@ -710,10 +713,11 @@ async function geminiText(key, prompt) {
     const found = await listFlashModel(key);
     if (found) { resp = await geminiCall(found, key, body); if (resp.ok) localStorage.setItem("ft_model", found); }
   }
+  if (!resp && lastResp) resp = lastResp;
   if (!resp) throw new Error("目前找不到可用的 Gemini 模型,請稍後再試。");
   if (!resp.ok) {
     if (resp.status === 400 || resp.status === 403) throw new Error("API Key 可能有誤(HTTP " + resp.status + ")");
-    if (resp.status === 429) throw new Error("已達免費額度上限,請稍後再試。");
+    if (resp.status === 429) throw new Error("AI 額度暫時用完(HTTP 429),等 1-2 分鐘再試。");
     throw new Error("AI 分析失敗(HTTP " + resp.status + ")");
   }
   const json = await resp.json();
@@ -726,7 +730,7 @@ $("coachBtn").addEventListener("click", async () => {
   if (!key) { $("coachStatus").textContent = "請先到「設定」貼上 Gemini API Key。"; return; }
   const btn = $("coachBtn");
   btn.disabled = true;
-  $("coachStatus").textContent = "⏳ AI 教練分析中…";
+  $("coachStatus").textContent = "AI 教練分析中…";
   try {
     const all = await idbAll("exercises");
     const today = todayStr();
@@ -748,7 +752,7 @@ $("coachBtn").addEventListener("click", async () => {
     await idbPut("coach", { date: today, ts: Date.now(), text });
     renderGym();
   } catch (err) {
-    $("coachStatus").textContent = "❌ " + err.message;
+    $("coachStatus").textContent = err.message;
   } finally {
     btn.disabled = false;
   }
@@ -820,20 +824,20 @@ function updateGymUI() {
     $("gymTime").textContent = "0:00";
     sub.textContent = "";
     $("gymRing").setAttribute("stroke-dashoffset", String(GYM_C));
-    main.textContent = "▶ 開始第 " + gym.setNumber + " 組";
-    main.style.background = "var(--green)";
+    main.textContent = "開始第 " + gym.setNumber + " 組";
+    main.style.background = "var(--accent)";
     finish.style.display = gym.sets.length ? "block" : "none";
   } else if (gym.phase === "working") {
     label.textContent = "第 " + gym.setNumber + " 組進行中";
     sub.textContent = "";
-    main.textContent = "⏸ 這組結束,開始休息";
-    main.style.background = "var(--blue)";
+    main.textContent = "這組結束,開始休息";
+    main.style.background = "var(--accent-blue)";
     finish.style.display = "block";
   } else {
     label.textContent = "休息中";
     sub.textContent = "上一組做了 " + fmtMin(gym.lastSetDuration);
-    main.textContent = "▶ 開始第 " + gym.setNumber + " 組";
-    main.style.background = "var(--green)";
+    main.textContent = "開始第 " + gym.setNumber + " 組";
+    main.style.background = "var(--accent)";
     finish.style.display = "block";
   }
 }
