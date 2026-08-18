@@ -26,7 +26,7 @@ function getSettings() {
   catch (e) { return Object.assign({}, DEFAULTS); }
 }
 function saveSettings(s) { localStorage.setItem("ft_settings", JSON.stringify(s)); }
-const getApiKey = () => localStorage.getItem("ft_apikey") || "";
+const getApiKey = () => { try { return localStorage.getItem("ft_apikey") || ""; } catch (e) { return ""; } };
 
 /* ============ IndexedDB ============ */
 let db = null;
@@ -267,6 +267,7 @@ $("importFile").addEventListener("change", async (e) => {
 ================================================== */
 const MEAL_TYPES = ["早餐", "午餐", "晚餐", "點心"];
 let mealImage = null; // {dataUrl, base64}
+let mealCorrections = []; // 使用者對估算的補充修正
 let currentMealType = defaultMealType();
 function defaultMealType() {
   const h = new Date().getHours();
@@ -399,6 +400,7 @@ function renderMealTypeSeg() {
 }
 $("addMealBtn").addEventListener("click", () => {
   mealImage = null;
+  mealCorrections = [];
   currentMealType = defaultMealType();
   renderMealTypeSeg();
   $("mealPreview").style.display = "none";
@@ -418,6 +420,7 @@ $("pickPhotoBtn").addEventListener("click", () => $("mealAlbum").click());
     const f = e.target.files[0];
     if (!f) return;
     mealImage = await resizeImage(f, 1024);
+    mealCorrections = [];
     $("mealPreview").src = mealImage.dataUrl;
     $("mealPreview").style.display = "block";
     $("analyzeBtn").style.display = "block";
@@ -445,16 +448,26 @@ $("manualBtn").addEventListener("click", () => {
   $("mealResult").style.display = "block";
   $("mealSaveBtn").disabled = false;
 });
-$("analyzeBtn").addEventListener("click", async () => {
-  if (!mealImage) return;
+$("analyzeBtn").addEventListener("click", () => runAnalysis());
+$("fixBtn").addEventListener("click", () => {
+  const note = $("fixInput").value.trim();
+  if (!note) { toast("先輸入要補充的內容"); return; }
+  mealCorrections.push(note);
+  $("fixInput").value = "";
+  runAnalysis();
+});
+
+async function runAnalysis() {
+  if (!mealImage) { $("mealError").textContent = "請先拍照或選一張餐點照片。"; return; }
   const key = getApiKey();
-  if (!key) { $("mealError").textContent = "請先到「設定」貼上 Gemini API Key(免費申請),或改用手動輸入。"; return; }
+  if (!key) { $("mealError").textContent = "請先到「設定」貼上 Gemini API Key(免費申請),或改用手動輸入。注意:主畫面 App 和 Safari 的儲存是分開的,Key 要在這個 App 裡貼。"; return; }
   const btn = $("analyzeBtn");
-  btn.disabled = true; btn.textContent = "⏳ AI 分析中…";
+  btn.disabled = true; $("fixBtn").disabled = true;
+  btn.textContent = "⏳ AI 分析中…";
   $("mealError").textContent = "";
   try {
     const ctx = await buildDietContext();
-    const r = await analyzeMeal(mealImage.base64, key, ctx);
+    const r = await analyzeMeal(mealImage.base64, key, ctx, mealCorrections);
     $("rName").value = r.name;
     $("rCal").value = Math.round(r.calories);
     $("rCarb").value = Math.round(r.carbs);
@@ -466,9 +479,10 @@ $("analyzeBtn").addEventListener("click", async () => {
   } catch (err) {
     $("mealError").textContent = err.message;
   } finally {
-    btn.disabled = false; btn.textContent = "✨ AI 分析熱量";
+    btn.disabled = false; $("fixBtn").disabled = false;
+    btn.textContent = "✨ AI 分析熱量";
   }
-});
+}
 
 /* 本地「記憶」:把近況整理成摘要一起給 AI,記憶本體只存在此裝置 */
 async function buildDietContext() {
@@ -519,47 +533,62 @@ async function listFlashModel(key) {
     return best ? best.name.replace(/^models\//, "") : null;
   } catch (e) { return null; }
 }
-
-async function analyzeMeal(base64, key, ctx) {
-  const prompt = '你是專業營養師。請分析這張餐點照片,估算整份餐點的營養成分。請「只」回傳以下格式的 JSON,不要加任何其他文字:{"name":"餐點名稱(繁體中文)","calories":數字,"carbs":數字,"protein":數字,"fat":數字,"advice":"一到兩句繁體中文的飲食建議"}。calories 單位 kcal,carbs/protein/fat 單位公克。如果照片不是食物,name 填「非食物」,數值全填 0。'
-    + (ctx ? '\n以下是這位使用者的近期狀況,advice 請針對此餐與這些數據給出具體個人化建議(例如還缺多少蛋白質、額度剩多少該怎麼配):\n' + ctx : '');
-  const body = {
-    contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: "image/jpeg", data: base64 } }] }],
-    generationConfig: { temperature: 0.2, response_mime_type: "application/json" },
-  };
+/* 通用請求:模型自動輪替,回傳文字 */
+async function geminiRequestText(key, body) {
   const cached = localStorage.getItem("ft_model");
   let candidates = MODEL_CANDIDATES.slice();
   if (cached) candidates = [cached].concat(candidates.filter((m) => m !== cached));
   let resp = null;
   for (const model of candidates) {
-    try {
-      resp = await geminiCall(model, key, body);
-    } catch (e) {
-      throw new Error("連線失敗,請確認網路。");
-    }
-    if (resp.status === 404) { resp = null; continue; } // 模型被 Google 下架 → 換下一個
+    try { resp = await geminiCall(model, key, body); }
+    catch (e) { throw new Error("連線失敗,請確認網路。"); }
+    if (resp.status === 404) { resp = null; continue; }
     if (resp.ok) localStorage.setItem("ft_model", model);
     break;
   }
   if (resp === null) {
     const found = await listFlashModel(key);
-    if (found) {
-      resp = await geminiCall(found, key, body);
-      if (resp.ok) localStorage.setItem("ft_model", found);
-    }
+    if (found) { resp = await geminiCall(found, key, body); if (resp.ok) localStorage.setItem("ft_model", found); }
   }
-  if (!resp) throw new Error("目前找不到可用的 Gemini 模型,請稍後再試或先手動輸入。");
+  if (!resp) throw new Error("目前找不到可用的 Gemini 模型,請稍後再試。");
   if (!resp.ok) {
-    if (resp.status === 400 || resp.status === 403) throw new Error("API Key 可能有誤(HTTP " + resp.status + ")");
-    if (resp.status === 429) throw new Error("已達免費額度上限,請稍後再試或手動輸入。");
-    throw new Error("AI 分析失敗(HTTP " + resp.status + ")");
+    const err = new Error(
+      resp.status === 403 || resp.status === 401 ? "API Key 可能有誤(HTTP " + resp.status + ")" :
+      resp.status === 429 ? "已達免費額度上限,請稍後再試或手動輸入。" :
+      "AI 分析失敗(HTTP " + resp.status + ")");
+    err.status = resp.status;
+    throw err;
   }
   const json = await resp.json();
-  let text = "";
-  try { text = json.candidates[0].content.parts[0].text; } catch (e) { throw new Error("AI 回覆格式無法解析"); }
+  try { return json.candidates[0].content.parts.map((p) => p.text || "").join(""); }
+  catch (e) { throw new Error("AI 回覆格式無法解析"); }
+}
+function extractJson(text) {
   text = text.replace(/```json/g, "").replace(/```/g, "").trim();
+  const a = text.indexOf("{"), b = text.lastIndexOf("}");
+  if (a >= 0 && b > a) text = text.slice(a, b + 1);
+  return JSON.parse(text);
+}
+async function analyzeMeal(base64, key, ctx, corrections) {
+  let prompt = '你是專業營養師。請分析這張餐點照片,估算整份餐點的營養成分。請「只」回傳以下格式的 JSON,不要加任何其他文字:{"name":"餐點名稱(繁體中文)","calories":數字,"carbs":數字,"protein":數字,"fat":數字,"advice":"一到兩句繁體中文的飲食建議"}。calories 單位 kcal,carbs/protein/fat 單位公克。如果照片不是食物,name 填「非食物」,數值全填 0。'
+    + "\n如果照片是有包裝的市售商品或連鎖店餐點(例如 7-11、全家、麥當勞、星巴克),請先用搜尋查該商品的官方營養標示,以官方標示數字為準,name 用商品正式名稱。";
+  if (ctx) prompt += "\n使用者近況(寫 advice 時參考):\n" + ctx;
+  if (corrections && corrections.length) {
+    prompt += "\n使用者對前次估算的補充修正,請完全以這些補充為準重新估算:\n- " + corrections.join("\n- ");
+  }
+  const contents = [{ parts: [{ text: prompt }, { inline_data: { mime_type: "image/jpeg", data: base64 } }] }];
+  let text;
+  try {
+    // 先試帶 Google 搜尋(可查官方營養標示)
+    text = await geminiRequestText(key, { contents, generationConfig: { temperature: 0.2 }, tools: [{ google_search: {} }] });
+  } catch (e) {
+    if (e && e.status === 400) {
+      // 帳號/模型不支援搜尋 → 退回一般模式
+      text = await geminiRequestText(key, { contents, generationConfig: { temperature: 0.2, response_mime_type: "application/json" } });
+    } else { throw e; }
+  }
   let r;
-  try { r = JSON.parse(text); } catch (e) { throw new Error("AI 回覆格式無法解析,請再試一次"); }
+  try { r = extractJson(text); } catch (e) { throw new Error("AI 回覆格式無法解析,請再試一次"); }
   return {
     name: String(r.name || "餐點"),
     calories: Number(r.calories) || 0,
@@ -885,8 +914,14 @@ $("sSaveBtn").addEventListener("click", () => {
   renderFood();
 });
 $("sApiSaveBtn").addEventListener("click", () => {
-  localStorage.setItem("ft_apikey", $("sApiKey").value.trim());
-  toast("API Key 已儲存(僅存於此裝置)");
+  const v = $("sApiKey").value.trim();
+  let ok = false;
+  try { localStorage.setItem("ft_apikey", v); ok = localStorage.getItem("ft_apikey") === v; } catch (e) { ok = false; }
+  if (ok) {
+    toast("API Key 已儲存 ✓");
+  } else {
+    alert("儲存失敗!瀏覽器可能封鎖了網站資料。請確認:1) 不是私密瀏覽 2) iPhone 設定 → Safari →「阻擋所有 Cookie」要關閉。");
+  }
 });
 $("exportBtn").addEventListener("click", async () => {
   const data = {
@@ -914,11 +949,27 @@ $("wipeBtn").addEventListener("click", async () => {
 });
 
 /* ============ 啟動 ============ */
+window.addEventListener("error", (e) => { try { toast("程式錯誤:" + (e.message || "未知")); } catch (_) {} });
+function openDBRetry(times) {
+  const attempt = () => Promise.race([
+    openDB(),
+    new Promise((_, rej) => setTimeout(() => rej(new Error("開啟逾時")), 2500)),
+  ]);
+  let p = attempt();
+  for (let i = 1; i < times; i++) p = p.catch(() => attempt());
+  return p;
+}
 (async function init() {
-  await openDB();
-  loadSettingsUI();
+  loadSettingsUI(); // 設定與 API Key 欄位不依賴資料庫,最先載入
   updateGymUI();
   renderGymLog();
+  try {
+    await openDBRetry(4);
+  } catch (e) {
+    toast("儲存空間啟動失敗,請完全關閉 App 後重開一次");
+    return;
+  }
+  renderGym();
   await renderHealth();
   await renderFood();
   if ("serviceWorker" in navigator && location.protocol === "https:") {
