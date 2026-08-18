@@ -543,7 +543,7 @@ async function geminiRequestText(key, body) {
   for (const model of candidates) {
     try { resp = await geminiCall(model, key, body); }
     catch (e) { throw new Error("連線失敗,請確認網路。"); }
-    if (resp.status === 404 || resp.status === 429) { lastResp = resp; resp = null; continue; }
+    if (resp.status === 404 || resp.status === 429 || resp.status === 500 || resp.status === 503) { lastResp = resp; resp = null; continue; }
     if (resp.ok) localStorage.setItem("ft_model", model);
     break;
   }
@@ -558,6 +558,7 @@ async function geminiRequestText(key, body) {
       resp.status === 403 || resp.status === 401 ? "API Key 可能有誤(HTTP " + resp.status + ")" :
       resp.status === 429 ? "AI 額度暫時用完(HTTP 429)。等 1-2 分鐘再試,或改用手動輸入。若一直發生,請確認 API Key 與你的 Google AI Pro 訂閱是同一個 Google 帳號。" :
       resp.status === 404 ? "找不到可用模型(HTTP 404)。請到「設定」按「測試 API 連線」,把結果截圖回報。" :
+      resp.status === 503 || resp.status === 500 ? "Google 伺服器暫時忙碌(HTTP " + resp.status + "),等幾秒再按一次即可。" :
       "AI 分析失敗(HTTP " + resp.status + ")");
     err.status = resp.status;
     throw err;
@@ -585,7 +586,7 @@ async function analyzeMeal(base64, key, ctx, corrections) {
     // 先試帶 Google 搜尋(可查官方營養標示)
     text = await geminiRequestText(key, { contents, generationConfig: { temperature: 0.2 }, tools: [{ google_search: {} }] });
   } catch (e) {
-    if (e && (e.status === 400 || e.status === 404 || e.status === 429)) {
+    if (e && e.status) {
       // 帳號/模型不支援搜尋 → 退回一般模式
       text = await geminiRequestText(key, { contents, generationConfig: { temperature: 0.2, response_mime_type: "application/json" } });
     } else { throw e; }
@@ -706,7 +707,7 @@ async function geminiText(key, prompt) {
   for (const model of candidates) {
     try { resp = await geminiCall(model, key, body); }
     catch (e) { throw new Error("連線失敗,請確認網路。"); }
-    if (resp.status === 404 || resp.status === 429) { lastResp = resp; resp = null; continue; }
+    if (resp.status === 404 || resp.status === 429 || resp.status === 500 || resp.status === 503) { lastResp = resp; resp = null; continue; }
     if (resp.ok) localStorage.setItem("ft_model", model);
     break;
   }
@@ -719,6 +720,7 @@ async function geminiText(key, prompt) {
   if (!resp.ok) {
     if (resp.status === 400 || resp.status === 403) throw new Error("API Key 可能有誤(HTTP " + resp.status + ")");
     if (resp.status === 429) throw new Error("AI 額度暫時用完(HTTP 429),等 1-2 分鐘再試。");
+    if (resp.status === 503 || resp.status === 500) throw new Error("Google 伺服器暫時忙碌(HTTP " + resp.status + "),等幾秒再按一次即可。");
     throw new Error("AI 分析失敗(HTTP " + resp.status + ")");
   }
   const json = await resp.json();
