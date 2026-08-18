@@ -1,5 +1,5 @@
 /* FitTrack service worker:離線快取 App 外殼 */
-const CACHE = "fittrack-v7";
+const CACHE = "fittrack-v8";
 const ASSETS = ["./", "./index.html", "./app.js", "./manifest.webmanifest",
                 "./icon-192.png", "./icon-512.png", "./apple-touch-icon.png"];
 self.addEventListener("install", (e) => {
