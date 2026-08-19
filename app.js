@@ -22,8 +22,15 @@ const fmtMin = (sec) => {
 /* ============ 設定(localStorage) ============ */
 const DEFAULTS = { budget: 2000, budgetTrain: 2200, budgetCardio: 2000, budgetRest: 1800, carb: 250, protein: 120, fat: 65, rest: 90 };
 function getSettings() {
-  try { return Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem("ft_settings") || "{}")); }
-  catch (e) { return Object.assign({}, DEFAULTS); }
+  let s;
+  try { s = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem("ft_settings") || "{}")); }
+  catch (e) { s = Object.assign({}, DEFAULTS); }
+  if (!s.days) {
+    const base = Number(s.budgetTrain) || 2200;
+    const mk = (b) => ({ kcal: b, carb: Math.round(s.carb * b / base), protein: s.protein, fat: Math.round(s.fat * b / base) });
+    s.days = { train: mk(Number(s.budgetTrain) || 2200), cardio: mk(Number(s.budgetCardio) || 2000), rest: mk(Number(s.budgetRest) || 1800) };
+  }
+  return s;
 }
 function saveSettings(s) { localStorage.setItem("ft_settings", JSON.stringify(s)); }
 const getApiKey = () => { try { return localStorage.getItem("ft_apikey") || ""; } catch (e) { return ""; } };
@@ -39,10 +46,26 @@ function setDayType(date, type) {
   catch (e) {}
 }
 function effectiveTargets(s, type) {
-  const map = { train: s.budgetTrain, cardio: s.budgetCardio, rest: s.budgetRest };
-  const budget = Number(map[type]) || Number(s.budgetCardio) || 2000;
-  const f = budget / (Number(s.budgetTrain) || budget || 1);
-  return { budget, carb: Math.round(s.carb * f), protein: s.protein, fat: Math.round(s.fat * f) };
+  const d = (s.days && (s.days[type] || s.days.cardio)) || { kcal: 2000, carb: 250, protein: 120, fat: 65 };
+  return { budget: d.kcal, carb: d.carb, protein: d.protein, fat: d.fat };
+}
+
+/* ---- 身體數據(InBody) ---- */
+function getProfile() {
+  try { return JSON.parse(localStorage.getItem("ft_profile") || "{}"); } catch (e) { return {}; }
+}
+function saveProfile(p) { try { localStorage.setItem("ft_profile", JSON.stringify(p)); } catch (e) {} }
+function profileText() {
+  const p = getProfile();
+  const parts = [];
+  if (p.height) parts.push("身高 " + p.height + "cm");
+  if (p.weight) parts.push("體重 " + p.weight + "kg");
+  if (p.bodyFat) parts.push("體脂 " + p.bodyFat + "%");
+  if (p.muscle) parts.push("骨骼肌 " + p.muscle + "kg");
+  if (p.age) parts.push(p.age + "歲");
+  if (p.gender) parts.push(p.gender);
+  if (p.note) parts.push(p.note);
+  return parts.length ? "我的身體數據:" + parts.join(",") + "。" : "";
 }
 function renderDayTypeSeg(active) {
   const el = $("dayTypeSeg");
@@ -316,12 +339,7 @@ async function renderFood() {
   const allMeals = await idbAll("meals");
   const meals = allMeals.filter((m) => m.date === todayStr());
   renderHistory(allMeals, s);
-  try {
-    if ($("dietCoachOut") && !$("dietCoachOut").textContent) {
-      const notes = (await idbAll("coach")).filter((c) => c.date === todayStr() && c.kind === "diet").sort((a, b) => b.ts - a.ts);
-      if (notes.length) $("dietCoachOut").textContent = notes[0].text;
-    }
-  } catch (e) {}
+  if (!dietThread.length) await loadDietThread(); else renderDietChat();
   const sum = (k) => meals.reduce((a, m) => a + (Number(m[k]) || 0), 0);
   const cal = sum("calories"), remaining = t.budget - cal;
 
@@ -349,7 +367,7 @@ async function renderFood() {
   meals.sort((a, b) => b.ts - a.ts);
   $("mealList").innerHTML = meals.length === 0 ? '<p class="sub small">還沒有紀錄,按上面「記錄一餐」吧!</p>' :
     meals.map((m) =>
-      `<div class="listitem">
+      `<div class="listitem" style="cursor:pointer" onclick="editMeal(${m.id})">
         ${m.thumb ? `<img src="${m.thumb}" alt="">` : '<span class="noimg">無圖</span>'}
         <div class="grow">
           <div class="name">${m.mealType}・${escapeHtml(m.name)}</div>
@@ -358,10 +376,17 @@ async function renderFood() {
           ${m.advice ? `<div class="advice">${escapeHtml(m.advice)}</div>` : ""}
         </div>
         <div><div class="kcal">${Math.round(m.calories)} kcal</div>
-        <button class="secondary" style="padding:4px 10px; font-size:12px; margin-top:4px" onclick="editMeal(${m.id})">編輯</button>
-        <button class="secondary" style="padding:4px 10px; font-size:12px; margin-top:4px" onclick="deleteMeal(${m.id})">刪除</button></div>
+        <button class="secondary" style="padding:4px 10px; font-size:12px; margin-top:4px" onclick="event.stopPropagation(); deleteMeal(${m.id})">刪除</button></div>
       </div>`
     ).join("");
+}
+function renderItemsTable(items) {
+  if (!items || !items.length) return "";
+  return '<table class="items"><tr><th>食物</th><th>kcal</th><th>碳</th><th>蛋</th><th>脂</th></tr>'
+    + items.map((i) =>
+      "<tr><td>" + escapeHtml(i.name) + "</td><td>" + Math.round(i.calories) + "</td><td>"
+      + Math.round(i.carbs) + "</td><td>" + Math.round(i.protein) + "</td><td>" + Math.round(i.fat) + "</td></tr>"
+    ).join("") + "</table>";
 }
 function escapeHtml(s) {
   return String(s || "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -430,30 +455,75 @@ function renderHistory(allMeals, s) {
   el.innerHTML = html;
 }
 
-/* ---------- AI 營養師:今日飲食總評 ---------- */
-$("dietCoachBtn").addEventListener("click", async () => {
+/* ---------- AI 營養師:可對話 ---------- */
+let dietThread = [];
+let dietChatRecId = null;
+function renderDietChat() {
+  const el = $("dietChatLog");
+  if (!el) return;
+  el.innerHTML = dietThread.map((m) =>
+    m.role === "user"
+      ? '<div class="chat-u">' + escapeHtml(m.text) + "</div>"
+      : '<div class="chat-m">' + escapeHtml(m.text) + "</div>"
+  ).join("") || '<p class="sub small">按下方按鈕請營養師評今天的飲食,或直接輸入問題(它知道你今天吃了什麼、練了什麼、身體數據)。</p>';
+}
+async function loadDietThread() {
+  try {
+    const recs = (await idbAll("coach")).filter((c) => c.date === todayStr() && c.kind === "dietchat");
+    if (recs.length) { dietThread = recs[recs.length - 1].msgs || []; dietChatRecId = recs[recs.length - 1].id; }
+  } catch (e) {}
+  renderDietChat();
+}
+async function saveDietThread() {
+  try {
+    if (dietChatRecId) {
+      const r = await idbGet("coach", dietChatRecId);
+      if (r) { r.msgs = dietThread; r.ts = Date.now(); await idbPut("coach", r); return; }
+    }
+    dietChatRecId = await idbPut("coach", { date: todayStr(), ts: Date.now(), kind: "dietchat", msgs: dietThread });
+  } catch (e) {}
+}
+async function dietBaseTurn() {
+  const ex = (await idbAll("exercises")).filter((e) => e.date === todayStr());
+  return "你是專業健身營養師,用繁體中文口語回答,精簡具體,不用任何 markdown 符號。以下是我目前的即時數據:"
+    + await buildDietContext()
+    + "今日運動:" + (ex.length ? ex.map((e) => e.type + ":" + e.desc).join(";") : "還沒運動") + "。"
+    + "請根據這些資料與我對話,提到食物時給具體品項與份量(例如便利商店買什麼)。";
+}
+async function sendDietChat(question) {
   const key = getApiKey();
   if (!key) { $("dietCoachStatus").textContent = "請先到「設定」貼上 Gemini API Key。"; return; }
-  const btn = $("dietCoachBtn");
-  btn.disabled = true;
-  $("dietCoachStatus").textContent = "AI 營養師分析中…";
+  $("dietCoachStatus").textContent = "營養師思考中…";
+  $("dietChatSend").disabled = true; $("dietCoachBtn").disabled = true;
+  dietThread.push({ role: "user", text: question });
+  renderDietChat();
   try {
-    const ex = (await idbAll("exercises")).filter((e) => e.date === todayStr());
-    const prompt = "你是專業營養師。以下是我今天的狀況:\n"
-      + "【飲食】" + await buildDietContext() + "\n"
-      + "【今日運動】" + (ex.length ? ex.map((e) => e.type + ":" + e.desc).join(";") : "還沒運動") + "\n"
-      + "請用繁體中文回覆,不要用任何 markdown 符號,分兩段,各段以下列標題開頭:\n"
-      + "飲食評語:(今天吃得如何?品質、蛋白質夠不夠、精緻碳水與油脂比例,2-3 句,語氣像朋友)\n"
-      + "接下來建議:(今天剩下的餐具體怎麼吃,給實際餐點與份量,例如便利商店或自助餐怎麼買)";
-    const text = (await geminiText(key, prompt)).trim();
-    $("dietCoachOut").textContent = text;
+    const contents = [
+      { role: "user", parts: [{ text: await dietBaseTurn() }] },
+      { role: "model", parts: [{ text: "了解,我已掌握你今天的數據,請說。" }] },
+    ].concat(dietThread.map((m) => ({ role: m.role === "user" ? "user" : "model", parts: [{ text: m.text }] })));
+    const text = (await geminiRequestText(key, { contents, generationConfig: { temperature: 0.5 } })).trim();
+    dietThread.push({ role: "model", text });
     $("dietCoachStatus").textContent = "";
-    await idbPut("coach", { date: todayStr(), ts: Date.now(), text, kind: "diet" });
+    await saveDietThread();
   } catch (err) {
+    dietThread.pop();
     $("dietCoachStatus").textContent = err.message;
   } finally {
-    btn.disabled = false;
+    $("dietChatSend").disabled = false; $("dietCoachBtn").disabled = false;
+    renderDietChat();
   }
+}
+$("dietChatSend").addEventListener("click", () => {
+  const q = $("dietChatInput").value.trim();
+  if (!q) return;
+  $("dietChatInput").value = "";
+  sendDietChat(q);
+});
+$("dietCoachBtn").addEventListener("click", () => {
+  dietThread = [];
+  dietChatRecId = null;
+  sendDietChat("請評今天到目前為止的飲食(品質、與目標的缺口),並給接下來的具體進食建議。");
 });
 
 /* ---------- 新增一餐 ---------- */
@@ -483,7 +553,7 @@ window.editMeal = async (id) => {
   $("rProtein").value = Math.round(m.protein);
   $("rFat").value = Math.round(m.fat);
   $("rAdvice").textContent = m.advice || "";
-  $("rItems").textContent = lastAnalysisItems.length ? "明細:" + lastAnalysisItems.map((i) => i.name + " " + Math.round(i.calories) + "kcal").join("、") : "";
+  $("rItems").innerHTML = renderItemsTable(lastAnalysisItems);
   $("mealResult").style.display = "block";
   $("mealSaveBtn").disabled = false;
   $("mealDialog").showModal();
@@ -493,7 +563,7 @@ window.editMeal = async (id) => {
 $("addMealBtn").addEventListener("click", () => {
   editingMealId = null;
   lastAnalysisItems = [];
-  $("rItems").textContent = "";
+  $("rItems").innerHTML = "";
   mealImage = null;
   mealCorrections = [];
   currentMealType = defaultMealType();
@@ -510,6 +580,7 @@ $("addMealBtn").addEventListener("click", () => {
   setTimeout(() => { try { document.activeElement.blur(); } catch (e) {} }, 60);
 });
 $("mealCancelBtn").addEventListener("click", () => $("mealDialog").close());
+$("mealCloseBtn").addEventListener("click", () => $("mealDialog").close());
 $("takePhotoBtn").addEventListener("click", () => $("mealPhoto").click());
 $("pickPhotoBtn").addEventListener("click", () => $("mealAlbum").click());
 [$("mealPhoto"), $("mealAlbum")].forEach((inp) =>
@@ -589,9 +660,7 @@ async function runAnalysis() {
     $("rProtein").value = Math.round(r.protein);
     $("rFat").value = Math.round(r.fat);
     $("rAdvice").textContent = r.advice || "";
-    $("rItems").textContent = lastAnalysisItems.length
-      ? "明細:" + lastAnalysisItems.map((i) => i.name + " " + Math.round(i.calories) + "kcal(蛋白 " + Math.round(i.protein) + "g)").join("、")
-      : "";
+    $("rItems").innerHTML = renderItemsTable(lastAnalysisItems);
     $("mealError").textContent = "";
     $("mealResult").style.display = "block";
     $("mealSaveBtn").disabled = false;
@@ -616,7 +685,7 @@ async function buildDietContext() {
     const tMeals = all.filter((m) => m.date === today);
     const sum = (arr, k) => arr.reduce((a, m) => a + (Number(m[k]) || 0), 0);
     const cal = sum(tMeals, "calories");
-    let ctx = "今天是" + DAY_TYPE_NAMES[dt] + "。已吃 " + Math.round(cal) + " kcal(額度 " + t.budget + ",剩 " + Math.round(t.budget - cal) + ")"
+    let ctx = profileText() + "今天是" + DAY_TYPE_NAMES[dt] + "。已吃 " + Math.round(cal) + " kcal(額度 " + t.budget + ",剩 " + Math.round(t.budget - cal) + ")"
       + ";碳水 " + Math.round(sum(tMeals, "carbs")) + "/" + t.carb + "g"
       + ";蛋白質 " + Math.round(sum(tMeals, "protein")) + "/" + t.protein + "g"
       + ";脂肪 " + Math.round(sum(tMeals, "fat")) + "/" + t.fat + "g。";
@@ -1049,27 +1118,77 @@ $("gymFinishBtn").addEventListener("click", async () => {
 ================================================== */
 function loadSettingsUI() {
   const s = getSettings();
-  $("sBudgetTrain").value = s.budgetTrain;
-  $("sBudgetCardio").value = s.budgetCardio;
-  $("sBudgetRest").value = s.budgetRest;
-  $("sCarb").value = s.carb;
-  $("sProtein").value = s.protein; $("sFat").value = s.fat; $("sRest").value = s.rest;
+  const map = { T: "train", C: "cardio", R: "rest" };
+  for (const k of ["T", "C", "R"]) {
+    const d = s.days[map[k]];
+    $("s" + k + "_kcal").value = d.kcal;
+    $("s" + k + "_carb").value = d.carb;
+    $("s" + k + "_pro").value = d.protein;
+    $("s" + k + "_fat").value = d.fat;
+  }
+  $("sRest").value = s.rest;
   $("sApiKey").value = getApiKey();
+  const p = getProfile();
+  $("pHeight").value = p.height || "";
+  $("pWeight").value = p.weight || "";
+  $("pFat").value = p.bodyFat || "";
+  $("pMuscle").value = p.muscle || "";
+  $("pAge").value = p.age || "";
+  $("pGender").value = p.gender || "";
+  $("pNote").value = p.note || "";
 }
 $("sSaveBtn").addEventListener("click", () => {
-  saveSettings({
-    budget: Number($("sBudgetCardio").value) || DEFAULTS.budget,
-    budgetTrain: Number($("sBudgetTrain").value) || DEFAULTS.budgetTrain,
-    budgetCardio: Number($("sBudgetCardio").value) || DEFAULTS.budgetCardio,
-    budgetRest: Number($("sBudgetRest").value) || DEFAULTS.budgetRest,
-    carb: Number($("sCarb").value) || DEFAULTS.carb,
-    protein: Number($("sProtein").value) || DEFAULTS.protein,
-    fat: Number($("sFat").value) || DEFAULTS.fat,
-    rest: Number($("sRest").value) || DEFAULTS.rest,
-  });
-  $("gymRest").value = String(getSettings().rest);
+  const s = getSettings();
+  const read = (id, fb) => Number($(id).value) || fb;
+  s.days = {
+    train:  { kcal: read("sT_kcal", 2200), carb: read("sT_carb", 270), protein: read("sT_pro", 130), fat: read("sT_fat", 70) },
+    cardio: { kcal: read("sC_kcal", 2000), carb: read("sC_carb", 250), protein: read("sC_pro", 120), fat: read("sC_fat", 65) },
+    rest:   { kcal: read("sR_kcal", 1800), carb: read("sR_carb", 200), protein: read("sR_pro", 120), fat: read("sR_fat", 55) },
+  };
+  s.rest = read("sRest", DEFAULTS.rest);
+  saveSettings(s);
+  $("gymRest").value = String(s.rest);
   toast("設定已儲存");
   renderFood();
+});
+$("pSaveBtn").addEventListener("click", () => {
+  saveProfile({
+    height: $("pHeight").value.trim(), weight: $("pWeight").value.trim(),
+    bodyFat: $("pFat").value.trim(), muscle: $("pMuscle").value.trim(),
+    age: $("pAge").value.trim(), gender: $("pGender").value,
+    note: $("pNote").value.trim(),
+  });
+  toast("身體數據已儲存(僅存於此裝置)");
+});
+$("pInbodyBtn").addEventListener("click", () => $("pInbodyFile").click());
+$("pInbodyFile").addEventListener("change", async (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  const key = getApiKey();
+  if (!key) { $("pStatus").textContent = "請先儲存 API Key。"; return; }
+  $("pStatus").textContent = "AI 讀取 InBody 報告中…";
+  try {
+    const img = await resizeImage(f, 1024);
+    const prompt = '這是一張 InBody 或體組成分析報告的照片。請「只」回傳以下格式的 JSON,不要加任何其他文字:{"height":數字或null,"weight":數字或null,"bodyFat":數字或null,"muscle":數字或null,"age":數字或null,"gender":"男或女或空字串","note":"其他重要數值(如內臟脂肪、基礎代謝),繁體中文一句話"}。height 單位 cm、weight/muscle 單位 kg、bodyFat 為百分比數字。看不清楚的欄位填 null。';
+    const text = await geminiRequestText(key, {
+      contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: "image/jpeg", data: img.base64 } }] }],
+      generationConfig: { temperature: 0.1 },
+    });
+    const r = extractJson(text);
+    if (r.height) $("pHeight").value = r.height;
+    if (r.weight) $("pWeight").value = r.weight;
+    if (r.bodyFat) $("pFat").value = r.bodyFat;
+    if (r.muscle) $("pMuscle").value = r.muscle;
+    if (r.age) $("pAge").value = r.age;
+    if (r.gender) $("pGender").value = r.gender;
+    if (r.note) $("pNote").value = r.note;
+    $("pSaveBtn").click();
+    $("pStatus").textContent = "已自動填入,請核對數字。";
+  } catch (err) {
+    $("pStatus").textContent = err.message;
+  } finally {
+    e.target.value = "";
+  }
 });
 $("sApiSaveBtn").addEventListener("click", () => {
   const v = $("sApiKey").value.trim();
