@@ -314,7 +314,7 @@ $("importFile").addEventListener("change", async (e) => {
    飲食分頁
 ================================================== */
 const MEAL_TYPES = ["早餐", "午餐", "晚餐", "點心"];
-let mealImage = null; // {dataUrl, base64}
+let mealImages = []; // 同一餐的多張照片 [{dataUrl, base64}]
 let mealCorrections = []; // 使用者對估算的補充修正
 let editingMealId = null;      // 編輯既有紀錄時的 id
 let lastAnalysisItems = [];    // 這次分析的單項明細
@@ -397,6 +397,65 @@ window.deleteMeal = async (id) => {
 };
 
 
+/* ---------- 歷史折線圖 ---------- */
+let chartDaySums = {};
+function renderHistoryChart(days, byDay, s, sumK) {
+  const card = $("historyChartCard");
+  if (!card) return;
+  if (days.length < 2) { card.style.display = "none"; return; }
+  card.style.display = "block";
+  const data = days.slice(0, 14).slice().reverse(); // 由舊到新
+  chartDaySums = {};
+  data.forEach((d) => {
+    const arr = byDay[d];
+    chartDaySums[d] = {
+      cal: Math.round(sumK(arr, "calories")),
+      carb: Math.round(sumK(arr, "carbs")),
+      pro: Math.round(sumK(arr, "protein")),
+      fat: Math.round(sumK(arr, "fat")),
+      budget: effectiveTargets(s, dayTypeFor(d)).budget,
+      n: arr.length,
+    };
+  });
+  const W = 330, H = 150, pL = 36, pR = 10, pT = 12, pB = 20;
+  const vals = data.map((d) => chartDaySums[d].cal);
+  const buds = data.map((d) => chartDaySums[d].budget);
+  const maxY = Math.max.apply(null, vals.concat(buds)) * 1.15 || 1;
+  const x = (i) => pL + (W - pL - pR) * (data.length === 1 ? 0.5 : i / (data.length - 1));
+  const y = (v) => pT + (H - pT - pB) * (1 - v / maxY);
+  const pts = data.map((d, i) => x(i) + "," + y(chartDaySums[d].cal)).join(" ");
+  const budPts = data.map((d, i) => x(i) + "," + y(chartDaySums[d].budget)).join(" ");
+  const gridVals = [Math.round(maxY / 2 / 100) * 100, Math.round(maxY / 1.15 / 100) * 100];
+  let svg = '<svg viewBox="0 0 ' + W + ' ' + H + '" style="width:100%; height:auto; display:block">';
+  gridVals.forEach((g) => {
+    svg += '<line x1="' + pL + '" y1="' + y(g) + '" x2="' + (W - pR) + '" y2="' + y(g) + '" stroke="var(--line)" stroke-width="1"/>'
+      + '<text x="' + (pL - 4) + '" y="' + (y(g) + 3) + '" text-anchor="end" font-size="9" fill="var(--sub)">' + g + '</text>';
+  });
+  svg += '<polyline points="' + budPts + '" fill="none" stroke="var(--sub)" stroke-width="1" stroke-dasharray="4 4" opacity="0.6"/>';
+  svg += '<polyline points="' + pts + '" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
+  data.forEach((d, i) => {
+    const over = chartDaySums[d].cal > chartDaySums[d].budget;
+    svg += '<circle id="pt-' + d + '" cx="' + x(i) + '" cy="' + y(chartDaySums[d].cal) + '" r="5.5" fill="var(--card)" '
+      + 'stroke="' + (over ? "var(--red)" : "var(--accent)") + '" stroke-width="2" style="cursor:pointer" '
+      + 'onclick="selectChartDay(\'' + d + '\')"/>';
+    if (i === 0 || i === data.length - 1) {
+      svg += '<text x="' + x(i) + '" y="' + (H - 6) + '" text-anchor="middle" font-size="9" fill="var(--sub)">'
+        + d.slice(5).replace("-", "/") + '</text>';
+    }
+  });
+  svg += '</svg>';
+  $("historyChart").innerHTML = svg;
+}
+window.selectChartDay = (d) => {
+  const v = chartDaySums[d];
+  if (!v) return;
+  $("chartInfo").innerHTML = "<b>" + d.slice(5).replace("-", "/") + "(" + weekdayName(d) + ")</b>・"
+    + v.n + " 餐・<b>" + v.cal + "</b> / " + v.budget + " kcal"
+    + (v.cal > v.budget ? '<span style="color:var(--red)">(超標)</span>' : "(達標)")
+    + "<br>碳水 " + v.carb + "g・蛋白質 " + v.pro + "g・脂肪 " + v.fat + "g";
+  if (!expandedDays.has(d)) window.toggleDay(d);
+};
+
 /* ---------- 每日歷史 ---------- */
 const expandedDays = new Set();
 window.toggleDay = (date) => {
@@ -420,11 +479,12 @@ function renderHistory(allMeals, s) {
     (byDay[m.date] = byDay[m.date] || []).push(m);
   });
   const days = Object.keys(byDay).sort().reverse().slice(0, 30);
+  const sumK = (arr, k) => arr.reduce((a, m) => a + (Number(m[k]) || 0), 0);
+  renderHistoryChart(days, byDay, s, sumK);
   if (days.length === 0) {
     el.innerHTML = '<p class="sub small">記錄幾天後,這裡會顯示每天的狀況</p>';
     return;
   }
-  const sumK = (arr, k) => arr.reduce((a, m) => a + (Number(m[k]) || 0), 0);
   const avg = Math.round(days.reduce((a, d) => a + sumK(byDay[d], "calories"), 0) / days.length);
   let html = '<p class="sub small" style="margin:2px 0 8px">近 ' + days.length + ' 天平均每日 <b>' + avg + '</b> kcal</p>';
   for (const d of days) {
@@ -537,14 +597,12 @@ window.editMeal = async (id) => {
   const m = await idbGet("meals", id);
   if (!m) return;
   editingMealId = id;
-  mealImage = m.thumb ? { dataUrl: m.thumb, base64: m.thumb.split(",")[1] } : null;
+  mealImages = m.thumb ? [{ dataUrl: m.thumb, base64: m.thumb.split(",")[1] }] : [];
   mealCorrections = [];
   lastAnalysisItems = m.items || [];
   currentMealType = m.mealType;
   renderMealTypeSeg();
-  $("mealPreview").src = m.thumb || "";
-  $("mealPreview").style.display = m.thumb ? "block" : "none";
-  $("analyzeBtn").style.display = m.thumb ? "block" : "none";
+  renderMealPreviews();
   $("mealError").textContent = "";
   $("descInput").value = "";
   $("rName").value = m.name;
@@ -564,12 +622,11 @@ $("addMealBtn").addEventListener("click", () => {
   editingMealId = null;
   lastAnalysisItems = [];
   $("rItems").innerHTML = "";
-  mealImage = null;
+  mealImages = [];
   mealCorrections = [];
   currentMealType = defaultMealType();
   renderMealTypeSeg();
-  $("mealPreview").style.display = "none";
-  $("analyzeBtn").style.display = "none";
+  renderMealPreviews();
   $("mealResult").style.display = "none";
   $("mealError").textContent = "";
   $("mealSaveBtn").disabled = true;
@@ -585,15 +642,24 @@ $("takePhotoBtn").addEventListener("click", () => $("mealPhoto").click());
 $("pickPhotoBtn").addEventListener("click", () => $("mealAlbum").click());
 [$("mealPhoto"), $("mealAlbum")].forEach((inp) =>
   inp.addEventListener("change", async (e) => {
-    const f = e.target.files[0];
-    if (!f) return;
-    mealImage = await resizeImage(f, 768);
+    for (const f of Array.from(e.target.files || [])) {
+      try { mealImages.push(await resizeImage(f, 768)); } catch (err) {}
+    }
     mealCorrections = [];
-    $("mealPreview").src = mealImage.dataUrl;
-    $("mealPreview").style.display = "block";
-    $("analyzeBtn").style.display = "block";
+    renderMealPreviews();
     e.target.value = "";
   }));
+function renderMealPreviews() {
+  const el = $("mealPreviews");
+  el.innerHTML = mealImages.map((im, i) =>
+    '<img src="' + im.dataUrl + '" alt="照片' + (i + 1) + '" onclick="removeMealImage(' + i + ')">').join("");
+  $("previewHint").style.display = mealImages.length ? "block" : "none";
+  $("analyzeBtn").style.display = mealImages.length ? "block" : "none";
+}
+window.removeMealImage = (i) => {
+  mealImages.splice(i, 1);
+  renderMealPreviews();
+};
 function resizeImage(file, maxDim) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -627,7 +693,7 @@ $("fixBtn").addEventListener("click", () => {
 
 async function runAnalysis() {
   const desc = $("descInput").value.trim();
-  if (!mealImage && !desc) { $("mealError").textContent = "請先拍照、選照片,或用文字描述你吃了什麼。"; return; }
+  if (!mealImages.length && !desc) { $("mealError").textContent = "請先拍照、選照片,或用文字描述你吃了什麼。"; return; }
   const key = getApiKey();
   if (!key) { $("mealError").textContent = "請先到「設定」貼上 Gemini API Key(免費申請),或改用手動輸入。"; return; }
   const btn = $("analyzeBtn");
@@ -640,7 +706,7 @@ async function runAnalysis() {
     let r = null, lastErr = null;
     for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        r = await analyzeMeal(mealImage ? mealImage.base64 : null, desc, key, ctx, mealCorrections);
+        r = await analyzeMeal(mealImages.map((im) => im.base64), desc, key, ctx, mealCorrections);
         lastErr = null;
         break;
       } catch (e) {
@@ -765,19 +831,22 @@ function extractJson(text) {
   if (a >= 0 && b > a) text = text.slice(a, b + 1);
   return JSON.parse(text);
 }
-async function analyzeMeal(base64, desc, key, ctx, corrections) {
-  let prompt = (base64
+async function analyzeMeal(base64s, desc, key, ctx, corrections) {
+  const n = (base64s || []).length;
+  let prompt = (n > 1
+    ? '你是專業營養師。以下 ' + n + ' 張照片屬於「同一餐」,可能是分開拍的食材或菜色,請把它們整合成一餐估算營養成分。'
+    : n === 1
     ? '你是專業營養師。請分析這張餐點照片,估算整份餐點的營養成分。'
     : '你是專業營養師。使用者沒有拍照,請根據他的文字描述,用常見份量估算這一餐的營養成分。')
     + '請「只」回傳以下格式的 JSON,不要加任何其他文字:{"name":"整餐名稱(繁體中文)","items":[{"name":"單項食物或飲料名","calories":數字,"carbs":數字,"protein":數字,"fat":數字}],"calories":整餐總熱量,"carbs":數字,"protein":數字,"fat":數字,"advice":"一到兩句繁體中文的飲食建議"}。items 請把每樣食物/飲料分開列(例如三明治一項、拿鐵一項),讓使用者看出哪樣是熱量炸彈。calories 單位 kcal,carbs/protein/fat 單位公克。如果內容不是食物,name 填「非食物」,數值全填 0。'
     + "\n如果是有包裝的市售商品或連鎖店餐點(例如 7-11、全家、麥當勞、拿坡里、星巴克),請先用搜尋查該商品的官方營養標示,以官方標示數字為準,name 用商品正式名稱。";
-  if (desc) prompt += (base64 ? "\n使用者補充說明:" : "\n他吃的內容:") + desc;
+  if (desc) prompt += (n ? "\n使用者補充說明:" : "\n他吃的內容:") + desc;
   if (ctx) prompt += "\n使用者近況(寫 advice 時參考):\n" + ctx;
   if (corrections && corrections.length) {
     prompt += "\n使用者對前次估算的補充修正,請完全以這些補充為準重新估算:\n- " + corrections.join("\n- ");
   }
   const parts = [{ text: prompt }];
-  if (base64) parts.push({ inline_data: { mime_type: "image/jpeg", data: base64 } });
+  (base64s || []).forEach((b) => parts.push({ inline_data: { mime_type: "image/jpeg", data: b } }));
   const contents = [{ parts }];
   let text;
   try {
@@ -809,9 +878,9 @@ async function analyzeMeal(base64, desc, key, ctx, corrections) {
 }
 $("mealSaveBtn").addEventListener("click", async () => {
   let thumb = null;
-  if (mealImage && !editingMealId) {
+  if (mealImages.length && !editingMealId) {
     const img = new Image();
-    img.src = mealImage.dataUrl;
+    img.src = mealImages[0].dataUrl;
     await new Promise((r) => { img.onload = r; });
     const c = document.createElement("canvas");
     const scale = Math.min(300 / Math.max(img.width, img.height), 1);
@@ -1136,6 +1205,7 @@ function loadSettingsUI() {
   $("pAge").value = p.age || "";
   $("pGender").value = p.gender || "";
   $("pNote").value = p.note || "";
+  try { $("targetReason").textContent = localStorage.getItem("ft_target_reason") || ""; } catch (e) {}
 }
 $("sSaveBtn").addEventListener("click", () => {
   const s = getSettings();
@@ -1159,6 +1229,45 @@ $("pSaveBtn").addEventListener("click", () => {
     note: $("pNote").value.trim(),
   });
   toast("身體數據已儲存(僅存於此裝置)");
+});
+$("aiTargetBtn").addEventListener("click", async () => {
+  const key = getApiKey();
+  const out = $("targetReason");
+  if (!key) { out.textContent = "請先儲存 API Key。"; return; }
+  const p = getProfile();
+  if (!p.weight || !p.height) { out.textContent = "請先在「身體數據」填入至少身高與體重(體脂/年齡/性別越齊,算得越準)。"; return; }
+  const btn = $("aiTargetBtn");
+  btn.disabled = true;
+  out.textContent = "AI 計算中…";
+  try {
+    const ex = (await idbAll("exercises")).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 15);
+    const prompt = "你是運動營養師。" + profileText()
+      + "近期運動紀錄:" + (ex.length ? ex.map((e) => e.date.slice(5) + " " + e.type + ":" + e.desc).join(";") : "無")
+      + '。請用 Mifflin-St Jeor 公式估算我的 BMR 與 TDEE,再幫我設定三種日子的每日目標(重訓日/有氧日/休息日)。'
+      + '請「只」回傳以下格式的 JSON,不要加任何其他文字:'
+      + '{"train":{"kcal":數字,"carb":數字,"protein":數字,"fat":數字},"cardio":{"kcal":數字,"carb":數字,"protein":數字,"fat":數字},"rest":{"kcal":數字,"carb":數字,"protein":數字,"fat":數字},"reason":"繁體中文 3-5 句,說明 BMR/TDEE 估算結果、蛋白質用多少 g/kg、三種日為何這樣配"}'
+      + '。carb/protein/fat 單位公克。若我的備註有寫目標(增肌/減脂),請依目標調整熱量盈虧。';
+    const r = extractJson(await geminiRequestText(key, {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.2, response_mime_type: "application/json" },
+    }));
+    const fill = (k, d) => {
+      if (!d) return;
+      $("s" + k + "_kcal").value = Math.round(d.kcal) || $("s" + k + "_kcal").value;
+      $("s" + k + "_carb").value = Math.round(d.carb) || $("s" + k + "_carb").value;
+      $("s" + k + "_pro").value = Math.round(d.protein) || $("s" + k + "_pro").value;
+      $("s" + k + "_fat").value = Math.round(d.fat) || $("s" + k + "_fat").value;
+    };
+    fill("T", r.train); fill("C", r.cardio); fill("R", r.rest);
+    const reason = String(r.reason || "");
+    try { localStorage.setItem("ft_target_reason", reason); } catch (e) {}
+    out.textContent = reason + "\n(已自動儲存,數字可直接修改後再按「儲存設定」)";
+    $("sSaveBtn").click();
+  } catch (err) {
+    out.textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
 });
 $("pInbodyBtn").addEventListener("click", () => $("pInbodyFile").click());
 $("pInbodyFile").addEventListener("change", async (e) => {
