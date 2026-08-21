@@ -64,6 +64,7 @@ function profileText() {
   if (p.muscle) parts.push("骨骼肌 " + p.muscle + "kg");
   if (p.age) parts.push(p.age + "歲");
   if (p.gender) parts.push(p.gender);
+  if (p.goal) parts.push("目標:" + p.goal);
   if (p.note) parts.push(p.note);
   return parts.length ? "我的身體數據:" + parts.join(",") + "。" : "";
 }
@@ -317,6 +318,61 @@ const MEAL_TYPES = ["早餐", "午餐", "晚餐", "點心"];
 let mealImages = []; // 同一餐的多張照片 [{dataUrl, base64}]
 let mealCorrections = []; // 使用者對估算的補充修正
 let editingMealId = null;      // 編輯既有紀錄時的 id
+
+/* ---- 常用餐(localStorage) ---- */
+function getFavs() {
+  try { return JSON.parse(localStorage.getItem("ft_favorites") || "[]"); } catch (e) { return []; }
+}
+function saveFavs(list) { try { localStorage.setItem("ft_favorites", JSON.stringify(list.slice(0, 15))); } catch (e) {} }
+function renderFavs() {
+  const el = $("favRow");
+  if (!el) return;
+  const favs = getFavs();
+  el.innerHTML = favs.length === 0 ? "" :
+    favs.map((f, i) =>
+      '<button type="button" class="fav-chip" onclick="useFav(' + i + ')">' + escapeHtml(f.name)
+      + ' <span style="color:var(--sub)">' + Math.round(f.calories) + '</span>'
+      + '<span class="x" onclick="event.stopPropagation(); removeFav(' + i + ')">✕</span></button>'
+    ).join("");
+}
+window.useFav = (i) => {
+  const f = getFavs()[i];
+  if (!f) return;
+  $("rName").value = f.name;
+  $("rCal").value = Math.round(f.calories);
+  $("rCarb").value = Math.round(f.carbs);
+  $("rProtein").value = Math.round(f.protein);
+  $("rFat").value = Math.round(f.fat);
+  $("rAdvice").textContent = "";
+  lastAnalysisItems = f.items || [];
+  $("rItems").innerHTML = renderItemsTable(lastAnalysisItems);
+  $("mealResult").style.display = "block";
+  $("mealSaveBtn").disabled = false;
+  toast("已帶入「" + f.name + "」,按儲存即可");
+};
+window.removeFav = (i) => {
+  const favs = getFavs();
+  favs.splice(i, 1);
+  saveFavs(favs);
+  renderFavs();
+};
+$("favSaveBtn").addEventListener("click", () => {
+  const name = $("rName").value.trim();
+  const cal = Number($("rCal").value) || 0;
+  if (!name || !cal) { toast("先有名稱與熱量才能存常用"); return; }
+  const favs = getFavs().filter((f) => f.name !== name);
+  favs.unshift({
+    name,
+    calories: cal,
+    carbs: Number($("rCarb").value) || 0,
+    protein: Number($("rProtein").value) || 0,
+    fat: Number($("rFat").value) || 0,
+    items: lastAnalysisItems || [],
+  });
+  saveFavs(favs);
+  renderFavs();
+  toast("已存為常用 ☆");
+});
 let lastAnalysisItems = [];    // 這次分析的單項明細
 let currentMealType = defaultMealType();
 function defaultMealType() {
@@ -626,6 +682,7 @@ $("addMealBtn").addEventListener("click", () => {
   mealCorrections = [];
   currentMealType = defaultMealType();
   renderMealTypeSeg();
+  renderFavs();
   renderMealPreviews();
   $("mealResult").style.display = "none";
   $("mealError").textContent = "";
@@ -1204,6 +1261,7 @@ function loadSettingsUI() {
   $("pMuscle").value = p.muscle || "";
   $("pAge").value = p.age || "";
   $("pGender").value = p.gender || "";
+  $("pGoal").value = p.goal || "";
   $("pNote").value = p.note || "";
   try { $("targetReason").textContent = localStorage.getItem("ft_target_reason") || ""; } catch (e) {}
 }
@@ -1226,6 +1284,7 @@ $("pSaveBtn").addEventListener("click", () => {
     height: $("pHeight").value.trim(), weight: $("pWeight").value.trim(),
     bodyFat: $("pFat").value.trim(), muscle: $("pMuscle").value.trim(),
     age: $("pAge").value.trim(), gender: $("pGender").value,
+    goal: $("pGoal").value,
     note: $("pNote").value.trim(),
   });
   toast("身體數據已儲存(僅存於此裝置)");
@@ -1245,8 +1304,8 @@ $("aiTargetBtn").addEventListener("click", async () => {
       + "近期運動紀錄:" + (ex.length ? ex.map((e) => e.date.slice(5) + " " + e.type + ":" + e.desc).join(";") : "無")
       + '。請用 Mifflin-St Jeor 公式估算我的 BMR 與 TDEE,再幫我設定三種日子的每日目標(重訓日/有氧日/休息日)。'
       + '請「只」回傳以下格式的 JSON,不要加任何其他文字:'
-      + '{"train":{"kcal":數字,"carb":數字,"protein":數字,"fat":數字},"cardio":{"kcal":數字,"carb":數字,"protein":數字,"fat":數字},"rest":{"kcal":數字,"carb":數字,"protein":數字,"fat":數字},"reason":"繁體中文 3-5 句,說明 BMR/TDEE 估算結果、蛋白質用多少 g/kg、三種日為何這樣配"}'
-      + '。carb/protein/fat 單位公克。若我的備註有寫目標(增肌/減脂),請依目標調整熱量盈虧。';
+      + '{"train":{"kcal":數字,"carb":數字,"protein":數字,"fat":數字},"cardio":{"kcal":數字,"carb":數字,"protein":數字,"fat":數字},"rest":{"kcal":數字,"carb":數字,"protein":數字,"fat":數字},"reason":"繁體中文:先說明 BMR/TDEE 估算結果、判斷的目標方向、蛋白質用多少 g/kg、三種日為何這樣配;最後附一份符合目標的一日示範菜單(早/午/晚/點心,含具體品項與份量)"}'
+      + '。carb/protein/fat 單位公克。若我的資料有寫目標,請依目標調整熱量盈虧;若沒有寫目標,請依我的體脂率與骨骼肌量自行評估最適合的方向,並在 reason 開頭說明你判斷的目標。';
     const r = extractJson(await geminiRequestText(key, {
       contents: [{ parts: [{ text: prompt }] }],
       generationConfig: { temperature: 0.2, response_mime_type: "application/json" },
