@@ -1,0 +1,14 @@
+{
+  "name": "EatTrack",
+  "short_name": "EatTrack",
+  "description": "隱私優先的飲食追蹤:AI 熱量分析、額度管理、體重曲線",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#5C6B4E",
+  "theme_color": "#5C6B4E",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
