@@ -37,6 +37,14 @@ const getApiKey = () => { try { return localStorage.getItem("ft_apikey") || ""; 
 
 /* ---- 當日型態(重訓/有氧/休息)與對應目標 ---- */
 const DAY_TYPE_NAMES = { train: "重訓日", cardio: "有氧日", rest: "休息日" };
+/* ---- 運動簡記(每日一行) ---- */
+function exNotes() {
+  try { return JSON.parse(localStorage.getItem("ft_exlog") || "{}"); } catch (e) { return {}; }
+}
+function exNoteFor(d) { return exNotes()[d] || ""; }
+function setExNote(d, text) {
+  try { const m = exNotes(); if (text) m[d] = text; else delete m[d]; localStorage.setItem("ft_exlog", JSON.stringify(m)); } catch (e) {}
+}
 function dayTypeFor(date) {
   try { const m = JSON.parse(localStorage.getItem("ft_daytypes") || "{}"); return m[date] || "cardio"; }
   catch (e) { return "cardio"; }
@@ -120,195 +128,8 @@ document.querySelectorAll("nav button").forEach((btn) => {
     btn.classList.add("on");
     document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
     $(btn.dataset.tab).classList.add("active");
-    if (btn.dataset.tab === "tab-health") renderHealth();
-    if (btn.dataset.tab === "tab-food") renderFood();
-    if (btn.dataset.tab === "tab-gym") renderGym();
+    if (btn.dataset.tab === "tab-food" || btn.dataset.tab === "tab-history") renderFood();
   });
-});
-
-/* ==================================================
-   健康分頁
-================================================== */
-async function renderHealth() {
-  const today = await idbGet("health", todayStr());
-  const cards = [
-    ["🛏", "昨晚睡眠", today && today.sleepHours != null ? today.sleepHours.toFixed(1) : "--", "小時"],
-    ["👟", "步數", today && today.steps != null ? Math.round(today.steps).toLocaleString() : "--", "步"],
-    ["🔥", "活動消耗", today && today.activeEnergy != null ? Math.round(today.activeEnergy) : "--", "kcal"],
-    ["🏃", "運動時間", today && today.exerciseMinutes != null ? Math.round(today.exerciseMinutes) : "--", "分鐘"],
-    ["❤️", "安靜心率", today && today.restingHR ? Math.round(today.restingHR) : "--", "bpm"],
-  ];
-  $("healthCards").innerHTML = cards.map(([ic, t, v, u]) =>
-    `<div class="card metric" style="margin:0"><div class="t">${ic} ${t}</div><div class="v">${v}<small>${u}</small></div></div>`
-  ).join("");
-
-  // 最近 7 天
-  const all = await idbAll("health");
-  all.sort((a, b) => b.date.localeCompare(a.date));
-  const last7 = all.slice(0, 7);
-  $("weekList").innerHTML = last7.length === 0 ? '<p class="sub small">尚無資料</p>' :
-    last7.map((r) =>
-      `<div class="listitem"><div class="grow"><div class="name">${r.date}${r.source === "manual" ? '<span class="pill">手動</span>' : '<span class="pill">匯入</span>'}</div>
-       <div class="detail">睡 ${r.sleepHours != null ? r.sleepHours.toFixed(1) : "-"}h・${r.steps != null ? Math.round(r.steps).toLocaleString() : "-"} 步・${r.activeEnergy != null ? Math.round(r.activeEnergy) : "-"} kcal・動 ${r.exerciseMinutes != null ? Math.round(r.exerciseMinutes) : "-"} 分</div></div></div>`
-    ).join("");
-
-  // 匯入的訓練
-  const hk = await idbAll("hkworkouts");
-  hk.sort((a, b) => b.date.localeCompare(a.date));
-  $("workoutImports").innerHTML = hk.length === 0 ? '<p class="sub small">匯入健康資料後顯示</p>' :
-    hk.slice(0, 10).map((w) =>
-      `<div class="listitem"><div class="grow"><div class="name">🏋️ ${w.type}</div>
-       <div class="detail">${w.date}</div></div><div class="kcal">${Math.round(w.minutes)} 分鐘</div></div>`
-    ).join("");
-}
-
-$("hDate").value = todayStr();
-$("hSaveBtn").addEventListener("click", async () => {
-  const date = $("hDate").value || todayStr();
-  const rec = (await idbGet("health", date)) || { date };
-  const read = (id) => { const v = $(id).value.trim(); return v === "" ? null : Number(v); };
-  const sleep = read("hSleep"), steps = read("hSteps"), energy = read("hEnergy"), ex = read("hExercise");
-  if (sleep != null) rec.sleepHours = sleep;
-  if (steps != null) rec.steps = steps;
-  if (energy != null) rec.activeEnergy = energy;
-  if (ex != null) rec.exerciseMinutes = ex;
-  rec.source = "manual";
-  await idbPut("health", rec);
-  ["hSleep", "hSteps", "hEnergy", "hExercise"].forEach((id) => { $(id).value = ""; });
-  toast("已儲存 " + date);
-  renderHealth();
-});
-
-/* ---------- Apple 健康 export.xml 串流解析 ---------- */
-const HK_TYPES = {
-  sleep: "HKCategoryTypeIdentifierSleepAnalysis",
-  steps: "HKQuantityTypeIdentifierStepCount",
-  energy: "HKQuantityTypeIdentifierActiveEnergyBurned",
-  exercise: "HKQuantityTypeIdentifierAppleExerciseTime",
-  rhr: "HKQuantityTypeIdentifierRestingHeartRate",
-};
-const SLEEP_ASLEEP = ["AsleepUnspecified", "AsleepCore", "AsleepDeep", "AsleepREM", "HKCategoryValueSleepAnalysisAsleep"];
-const WORKOUT_NAMES = {
-  HKWorkoutActivityTypeRunning: "跑步", HKWorkoutActivityTypeWalking: "健走",
-  HKWorkoutActivityTypeCycling: "騎車", HKWorkoutActivityTypeTraditionalStrengthTraining: "重量訓練",
-  HKWorkoutActivityTypeFunctionalStrengthTraining: "功能性訓練", HKWorkoutActivityTypeSwimming: "游泳",
-  HKWorkoutActivityTypeYoga: "瑜伽", HKWorkoutActivityTypeHiking: "登山",
-  HKWorkoutActivityTypeHighIntensityIntervalTraining: "HIIT", HKWorkoutActivityTypeCoreTraining: "核心訓練",
-  HKWorkoutActivityTypeElliptical: "滑步機", HKWorkoutActivityTypeRowing: "划船",
-};
-const attr = (tag, name) => {
-  const m = tag.match(new RegExp(name + '="([^"]*)"'));
-  return m ? m[1] : "";
-};
-function parseAppleDate(s) {
-  // "2026-07-14 07:30:00 +0800" → ISO
-  const iso = s.replace(" ", "T").replace(/ ([+-]\d{2})(\d{2})$/, "$1:$2");
-  const d = new Date(iso);
-  return isNaN(d) ? null : d;
-}
-function ensureDay(daily, date) {
-  if (!daily[date]) daily[date] = { sleep: {}, steps: {}, energy: {}, exercise: {}, rhr: null };
-  return daily[date];
-}
-function processChunk(text, daily, workouts) {
-  // Record(自閉合標籤,一行一筆)
-  const recRe = /<Record [^>]*\/>/g;
-  let m;
-  while ((m = recRe.exec(text)) !== null) {
-    const tag = m[0];
-    const type = attr(tag, "type");
-    if (type === HK_TYPES.sleep) {
-      const val = attr(tag, "value");
-      if (!SLEEP_ASLEEP.some((k) => val.indexOf(k) !== -1)) continue;
-      const st = parseAppleDate(attr(tag, "startDate"));
-      const en = parseAppleDate(attr(tag, "endDate"));
-      if (!st || !en) continue;
-      const date = attr(tag, "endDate").slice(0, 10);
-      const src = attr(tag, "sourceName") || "?";
-      const day = ensureDay(daily, date);
-      day.sleep[src] = (day.sleep[src] || 0) + (en - st) / 3600000;
-    } else if (type === HK_TYPES.steps || type === HK_TYPES.energy || type === HK_TYPES.exercise) {
-      const v = parseFloat(attr(tag, "value"));
-      if (!isFinite(v)) continue;
-      const date = attr(tag, "startDate").slice(0, 10);
-      const src = attr(tag, "sourceName") || "?";
-      const day = ensureDay(daily, date);
-      const key = type === HK_TYPES.steps ? "steps" : type === HK_TYPES.energy ? "energy" : "exercise";
-      day[key][src] = (day[key][src] || 0) + v;
-    } else if (type === HK_TYPES.rhr) {
-      const v = parseFloat(attr(tag, "value"));
-      if (!isFinite(v)) continue;
-      const date = attr(tag, "startDate").slice(0, 10);
-      ensureDay(daily, date).rhr = v;
-    }
-  }
-  // Workout(取開頭標籤)
-  const wRe = /<Workout [^>]*>/g;
-  while ((m = wRe.exec(text)) !== null) {
-    const tag = m[0];
-    const t = attr(tag, "workoutActivityType");
-    if (!t) continue;
-    const dur = parseFloat(attr(tag, "duration"));
-    workouts.push({
-      date: attr(tag, "startDate").slice(0, 10),
-      type: WORKOUT_NAMES[t] || "運動",
-      minutes: isFinite(dur) ? dur : 0,
-    });
-  }
-}
-$("importFile").addEventListener("change", async (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  const prog = $("importProgress"), status = $("importStatus");
-  prog.style.display = "block";
-  status.textContent = "解析中…(檔案大時需 1–2 分鐘,請勿離開)";
-  const daily = {}, workouts = [];
-  try {
-    const CHUNK = 8 * 1024 * 1024;
-    let offset = 0, tail = "";
-    while (offset < file.size) {
-      const text = await file.slice(offset, offset + CHUNK).text();
-      let data = tail + text;
-      const cut = data.lastIndexOf("\n");
-      if (cut >= 0) { tail = data.slice(cut + 1); data = data.slice(0, cut + 1); }
-      else { tail = data; data = ""; }
-      processChunk(data, daily, workouts);
-      offset += CHUNK;
-      prog.value = Math.min(offset / file.size, 1);
-      await new Promise((r) => setTimeout(r, 0)); // 讓 UI 呼吸
-    }
-    processChunk(tail, daily, workouts);
-
-    // 寫入(同來源取最大值避免 iPhone+Watch 重複計算;手動紀錄不覆蓋)
-    let count = 0;
-    const maxOf = (obj) => { const vs = Object.values(obj); return vs.length ? Math.max.apply(null, vs) : null; };
-    for (const date of Object.keys(daily)) {
-      const d = daily[date];
-      const existing = await idbGet("health", date);
-      if (existing && existing.source === "manual") continue;
-      const rec = { date, source: "import" };
-      const sleep = maxOf(d.sleep), steps = maxOf(d.steps), energy = maxOf(d.energy), ex = maxOf(d.exercise);
-      if (sleep != null) rec.sleepHours = sleep;
-      if (steps != null) rec.steps = steps;
-      if (energy != null) rec.activeEnergy = energy;
-      if (ex != null) rec.exerciseMinutes = ex;
-      if (d.rhr != null) rec.restingHR = d.rhr;
-      await idbPut("health", rec);
-      count++;
-    }
-    await idbClear("hkworkouts");
-    workouts.sort((a, b) => b.date.localeCompare(a.date));
-    for (const w of workouts.slice(0, 50)) await idbPut("hkworkouts", w);
-
-    status.textContent = "完成!匯入 " + count + " 天的數據、" + workouts.length + " 次訓練。";
-    toast("匯入完成");
-    renderHealth();
-  } catch (err) {
-    status.textContent = "解析失敗:" + err.message;
-  } finally {
-    prog.style.display = "none";
-    e.target.value = "";
-  }
 });
 
 /* ==================================================
@@ -324,20 +145,28 @@ function getFavs() {
   try { return JSON.parse(localStorage.getItem("ft_favorites") || "[]"); } catch (e) { return []; }
 }
 function saveFavs(list) { try { localStorage.setItem("ft_favorites", JSON.stringify(list.slice(0, 15))); } catch (e) {} }
-function renderFavs() {
+function renderFavs(filter) {
   const el = $("favRow");
   if (!el) return;
-  const favs = getFavs();
+  let favs = getFavs();
+  favs.forEach((f, i) => { f._i = i; });
+  favs.sort((a, b) => (b.count || 0) - (a.count || 0));
+  $("favSearch").style.display = getFavs().length >= 6 ? "block" : "none";
+  if (filter) favs = favs.filter((f) => f.name.toLowerCase().includes(filter.toLowerCase()));
   el.innerHTML = favs.length === 0 ? "" :
-    favs.map((f, i) =>
+    favs.map((f) => { const i = f._i; return (
       '<button type="button" class="fav-chip" onclick="useFav(' + i + ')">' + escapeHtml(f.name)
       + ' <span style="color:var(--sub)">' + Math.round(f.calories) + '</span>'
-      + '<span class="x" onclick="event.stopPropagation(); removeFav(' + i + ')">✕</span></button>'
+      + '<span class="x" onclick="event.stopPropagation(); removeFav(' + i + ')">✕</span></button>'); }
     ).join("");
 }
+$("favSearch").addEventListener("input", () => renderFavs($("favSearch").value.trim()));
 window.useFav = (i) => {
-  const f = getFavs()[i];
+  const favs = getFavs();
+  const f = favs[i];
   if (!f) return;
+  f.count = (f.count || 0) + 1;
+  saveFavs(favs);
   $("rName").value = f.name;
   $("rCal").value = Math.round(f.calories);
   $("rCarb").value = Math.round(f.carbs);
@@ -360,8 +189,10 @@ $("favSaveBtn").addEventListener("click", () => {
   const name = $("rName").value.trim();
   const cal = Number($("rCal").value) || 0;
   if (!name || !cal) { toast("先有名稱與熱量才能存常用"); return; }
+  const prev = getFavs().find((f) => f.name === name);
   const favs = getFavs().filter((f) => f.name !== name);
   favs.unshift({
+    count: prev ? prev.count || 0 : 0,
     name,
     calories: cal,
     carbs: Number($("rCarb").value) || 0,
@@ -394,7 +225,17 @@ async function renderFood() {
   renderDayTypeSeg(dt);
   const allMeals = await idbAll("meals");
   const meals = allMeals.filter((m) => m.date === todayStr());
-  renderHistory(allMeals, s);
+  const healthAll = await idbAll("health");
+  const weights = {};
+  healthAll.forEach((h) => { if (h.weight) weights[h.date] = h.weight; });
+  renderHistory(allMeals, s, weights);
+  renderTodayExtras();
+  try {
+    if ($("weeklyOut") && !$("weeklyOut").textContent) {
+      const w = (await idbAll("coach")).filter((c) => c.kind === "weekly").sort((a, b) => b.ts - a.ts);
+      if (w.length) $("weeklyOut").textContent = w[0].text;
+    }
+  } catch (e) {}
   if (!dietThread.length) await loadDietThread(); else renderDietChat();
   const sum = (k) => meals.reduce((a, m) => a + (Number(m[k]) || 0), 0);
   const cal = sum("calories"), remaining = t.budget - cal;
@@ -455,7 +296,7 @@ window.deleteMeal = async (id) => {
 
 /* ---------- 歷史折線圖 ---------- */
 let chartDaySums = {};
-function renderHistoryChart(days, byDay, s, sumK) {
+function renderHistoryChart(days, byDay, s, sumK, weights) {
   const card = $("historyChartCard");
   if (!card) return;
   if (days.length < 2) { card.style.display = "none"; return; }
@@ -499,8 +340,23 @@ function renderHistoryChart(days, byDay, s, sumK) {
         + d.slice(5).replace("-", "/") + '</text>';
     }
   });
+  const wDays = data.filter((d) => weights[d]);
+  if (wDays.length >= 1) {
+    const wVals = wDays.map((d) => weights[d]);
+    const wMin = Math.min.apply(null, wVals) - 1, wMax = Math.max.apply(null, wVals) + 1;
+    const wy = (v) => pT + (H - pT - pB) * (1 - (v - wMin) / (wMax - wMin || 1));
+    const wPts = wDays.map((d) => x(data.indexOf(d)) + "," + wy(weights[d])).join(" ");
+    if (wDays.length > 1) {
+      svg += '<polyline points="' + wPts + '" fill="none" stroke="var(--blue)" stroke-width="1.5" stroke-dasharray="2 3" opacity="0.9"/>';
+    }
+    wDays.forEach((d) => {
+      svg += '<rect x="' + (x(data.indexOf(d)) - 3) + '" y="' + (wy(weights[d]) - 3) + '" width="6" height="6" rx="1.5" fill="var(--blue)"/>';
+    });
+    svg += '<text x="' + (W - pR) + '" y="' + (pT + 8) + '" text-anchor="end" font-size="9" fill="var(--blue)">體重 ' + wVals[wVals.length - 1] + 'kg</text>';
+  }
   svg += '</svg>';
   $("historyChart").innerHTML = svg;
+  renderHistoryChart._weights = weights;
 }
 window.selectChartDay = (d) => {
   const v = chartDaySums[d];
@@ -508,7 +364,8 @@ window.selectChartDay = (d) => {
   $("chartInfo").innerHTML = "<b>" + d.slice(5).replace("-", "/") + "(" + weekdayName(d) + ")</b>・"
     + v.n + " 餐・<b>" + v.cal + "</b> / " + v.budget + " kcal"
     + (v.cal > v.budget ? '<span style="color:var(--red)">(超標)</span>' : "(達標)")
-    + "<br>碳水 " + v.carb + "g・蛋白質 " + v.pro + "g・脂肪 " + v.fat + "g";
+    + "<br>碳水 " + v.carb + "g・蛋白質 " + v.pro + "g・脂肪 " + v.fat + "g"
+    + ((renderHistoryChart._weights || {})[d] ? "・體重 " + renderHistoryChart._weights[d] + "kg" : "");
   if (!expandedDays.has(d)) window.toggleDay(d);
 };
 
@@ -525,7 +382,7 @@ function weekdayName(dateStr) {
   const d = new Date(dateStr + "T12:00:00");
   return ["日", "一", "二", "三", "四", "五", "六"][d.getDay()];
 }
-function renderHistory(allMeals, s) {
+function renderHistory(allMeals, s, weights) {
   const el = $("historyList");
   if (!el) return;
   const today = todayStr();
@@ -536,7 +393,7 @@ function renderHistory(allMeals, s) {
   });
   const days = Object.keys(byDay).sort().reverse().slice(0, 30);
   const sumK = (arr, k) => arr.reduce((a, m) => a + (Number(m[k]) || 0), 0);
-  renderHistoryChart(days, byDay, s, sumK);
+  renderHistoryChart(days, byDay, s, sumK, weights || {});
   if (days.length === 0) {
     el.innerHTML = '<p class="sub small">記錄幾天後,這裡會顯示每天的狀況</p>';
     return;
@@ -571,6 +428,74 @@ function renderHistory(allMeals, s) {
   el.innerHTML = html;
 }
 
+/* ---------- 體重 & 運動簡記 ---------- */
+async function renderTodayExtras() {
+  const h = await idbGet("health", todayStr());
+  if ($("wNum") && !$("wNum").value && h && h.weight) $("wNum").value = h.weight;
+  if ($("exNote") && !$("exNote").value) $("exNote").value = exNoteFor(todayStr());
+}
+$("wSaveBtn").addEventListener("click", async () => {
+  const v = Number($("wNum").value);
+  if (!v) { toast("先輸入體重"); return; }
+  const rec = (await idbGet("health", todayStr())) || { date: todayStr() };
+  rec.weight = v;
+  await idbPut("health", rec);
+  toast("體重已記錄 " + v + " kg");
+  renderFood();
+});
+$("exSaveBtn").addEventListener("click", () => {
+  setExNote(todayStr(), $("exNote").value.trim());
+  toast("已記錄今天的運動");
+});
+
+/* ---------- AI 週報 ---------- */
+$("weeklyBtn").addEventListener("click", async () => {
+  const key = getApiKey();
+  if (!key) { $("weeklyStatus").textContent = "請先到「設定」貼上 Gemini API Key。"; return; }
+  const btn = $("weeklyBtn");
+  btn.disabled = true;
+  $("weeklyStatus").textContent = "AI 整理近 7 天中…";
+  try {
+    const s = getSettings();
+    const meals = await idbAll("meals");
+    const healthAll = await idbAll("health");
+    const exm = exNotes();
+    const lines = [];
+    for (let o = 6; o >= 0; o--) {
+      const t = new Date(Date.now() - o * 86400000);
+      const d = t.getFullYear() + "-" + String(t.getMonth() + 1).padStart(2, "0") + "-" + String(t.getDate()).padStart(2, "0");
+      const arr = meals.filter((m) => m.date === d);
+      const tg = effectiveTargets(s, dayTypeFor(d));
+      const sum = (k) => Math.round(arr.reduce((a, m) => a + (Number(m[k]) || 0), 0));
+      const hw = healthAll.find((x) => x.date === d);
+      lines.push(d.slice(5) + "(" + DAY_TYPE_NAMES[dayTypeFor(d)] + "):"
+        + (arr.length ? sum("calories") + "/" + tg.budget + "kcal,碳" + sum("carbs") + "蛋" + sum("protein") + "脂" + sum("fat")
+          + ",吃了" + arr.map((m) => m.name).join("、")
+          : "無紀錄")
+        + (hw && hw.weight ? ",體重" + hw.weight : "")
+        + (exm[d] ? ",運動:" + exm[d] : ""));
+    }
+    const prompt = "你是專業營養師。" + profileText()
+      + "以下是我近 7 天的飲食紀錄(實際/目標):\n" + lines.join("\n")
+      + "\n請用繁體中文,不用任何 markdown 符號,分四段,各段以下列標題開頭:\n"
+      + "本週總評:(整體吃得如何,2-3句,語氣像朋友)\n"
+      + "數字重點:(平均熱量與目標差多少、蛋白質達成率、體重變化)\n"
+      + "最大地雷:(這週最拖後腿的食物或習慣,點名它)\n"
+      + "下週重點:(只給一個最重要的改變,講清楚怎麼做)";
+    const text = (await geminiRequestText(key, {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { temperature: 0.4 },
+    })).trim();
+    $("weeklyOut").textContent = text;
+    $("weeklyStatus").textContent = "";
+    await idbPut("coach", { date: todayStr(), ts: Date.now(), kind: "weekly", text });
+  } catch (err) {
+    $("weeklyStatus").textContent = err.message;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
 /* ---------- AI 營養師:可對話 ---------- */
 let dietThread = [];
 let dietChatRecId = null;
@@ -600,10 +525,8 @@ async function saveDietThread() {
   } catch (e) {}
 }
 async function dietBaseTurn() {
-  const ex = (await idbAll("exercises")).filter((e) => e.date === todayStr());
   return "你是專業健身營養師,用繁體中文口語回答,精簡具體,不用任何 markdown 符號。以下是我目前的即時數據:"
     + await buildDietContext()
-    + "今日運動:" + (ex.length ? ex.map((e) => e.type + ":" + e.desc).join(";") : "還沒運動") + "。"
     + "請根據這些資料與我對話,提到食物時給具體品項與份量(例如便利商店買什麼)。";
 }
 async function sendDietChat(question) {
@@ -653,6 +576,7 @@ window.editMeal = async (id) => {
   const m = await idbGet("meals", id);
   if (!m) return;
   editingMealId = id;
+  $("mealDate").value = m.date;
   mealImages = m.thumb ? [{ dataUrl: m.thumb, base64: m.thumb.split(",")[1] }] : [];
   mealCorrections = [];
   lastAnalysisItems = m.items || [];
@@ -676,6 +600,7 @@ window.editMeal = async (id) => {
 
 $("addMealBtn").addEventListener("click", () => {
   editingMealId = null;
+  $("mealDate").value = todayStr();
   lastAnalysisItems = [];
   $("rItems").innerHTML = "";
   mealImages = [];
@@ -821,7 +746,9 @@ async function buildDietContext() {
       ctx += "近 " + recent.length + " 天平均每日 " + Math.round(avg) + " kcal。";
     }
     const h = await idbGet("health", today);
-    if (h && h.activeEnergy != null) ctx += "今日活動消耗 " + Math.round(h.activeEnergy) + " kcal。";
+    if (h && h.weight) ctx += "今日體重 " + h.weight + " kg。";
+    const exn = exNoteFor(today);
+    ctx += "今天運動:" + (exn || "還沒記錄") + "。";
     return ctx;
   } catch (e) { return ""; }
 }
@@ -955,289 +882,31 @@ $("mealSaveBtn").addEventListener("click", async () => {
     advice: $("rAdvice").textContent || "",
     items: lastAnalysisItems,
   };
+  const pickedDate = ($("mealDate").value || todayStr()).slice(0, 10);
+  const isToday = pickedDate === todayStr();
   if (editingMealId) {
     const m = await idbGet("meals", editingMealId);
     if (m) {
       Object.assign(m, fields);
+      if (m.date !== pickedDate) {
+        m.date = pickedDate;
+        m.ts = isToday ? Date.now() : new Date(pickedDate + "T12:00:00").getTime();
+      }
       await idbPut("meals", m);
     }
     toast("已更新!");
   } else {
-    await idbPut("meals", Object.assign({ date: todayStr(), ts: Date.now(), thumb }, fields));
-    toast("已記錄!");
+    await idbPut("meals", Object.assign({
+      date: pickedDate,
+      ts: isToday ? Date.now() : new Date(pickedDate + "T12:00:00").getTime(),
+      thumb,
+    }, fields));
+    toast(isToday ? "已記錄!" : "已補記到 " + pickedDate.slice(5).replace("-", "/"));
   }
   editingMealId = null;
   $("mealDialog").close();
   renderFood();
 });
-
-/* ==================================================
-   運動紀錄 + AI 教練
-================================================== */
-const EX_TYPES = ["重訓", "跑步", "游泳", "騎車", "健走", "其他"];
-const expandedExDays = new Set();
-window.toggleExDay = (d) => {
-  if (expandedExDays.has(d)) expandedExDays.delete(d); else expandedExDays.add(d);
-  const el = document.getElementById("exday-" + d);
-  if (el) el.style.display = expandedExDays.has(d) ? "block" : "none";
-  const a = document.getElementById("exarrow-" + d);
-  if (a) a.textContent = expandedExDays.has(d) ? "▾" : "▸";
-};
-window.deleteExercise = async (id) => { await idbDel("exercises", id); renderGym(); };
-
-async function renderGym() {
-  const all = await idbAll("exercises");
-  const coach = await idbAll("coach");
-  const today = todayStr();
-
-  const t = all.filter((e) => e.date === today).sort((a, b) => a.ts - b.ts);
-  $("exList").innerHTML = t.length === 0 ? '<p class="sub small">今天還沒記錄運動</p>' :
-    t.map((e) =>
-      '<div class="listitem"><div class="grow"><div class="name">' + e.type + '</div>'
-      + '<div class="detail">' + escapeHtml(e.desc) + '</div></div>'
-      + '<button class="secondary" style="padding:4px 10px; font-size:12px" onclick="deleteExercise(' + e.id + ')">刪除</button></div>'
-    ).join("");
-
-  const todayNotes = coach.filter((c) => c.date === today).sort((a, b) => b.ts - a.ts);
-  if (todayNotes.length && !$("coachOutput").textContent) $("coachOutput").textContent = todayNotes[0].text;
-
-  const byDay = {};
-  all.forEach((e) => { if (e.date !== today) (byDay[e.date] = byDay[e.date] || { ex: [], note: "" }).ex.push(e); });
-  coach.forEach((c) => {
-    if (c.date === today) return;
-    if (!byDay[c.date]) byDay[c.date] = { ex: [], note: "" };
-    byDay[c.date].note = c.text;
-  });
-  const days = Object.keys(byDay).sort().reverse().slice(0, 30);
-  $("exHistory").innerHTML = days.length === 0 ? '<p class="sub small">記錄幾天後,這裡會顯示每天的運動與 AI 建議</p>' :
-    days.map((d) => {
-      const g = byDay[d];
-      const open = expandedExDays.has(d);
-      return '<div class="listitem" style="cursor:pointer" onclick="toggleExDay(\'' + d + '\')">'
-        + '<div class="grow"><div class="name"><span id="exarrow-' + d + '">' + (open ? "▾" : "▸") + '</span> '
-        + d.slice(5).replace("-", "/") + "(" + weekdayName(d) + ")" + '</div>'
-        + '<div class="detail">' + (g.ex.map((e) => e.type + " " + e.desc).join("、") || "無運動") + (g.note ? "・含 AI 建議" : "") + '</div></div></div>'
-        + '<div id="exday-' + d + '" style="display:' + (open ? "block" : "none") + '; padding-left:10px">'
-        + g.ex.map((e) => '<div class="listitem"><div class="grow"><div class="name" style="font-size:13px">' + e.type + '</div><div class="detail">' + escapeHtml(e.desc) + '</div></div></div>').join("")
-        + (g.note ? '<p class="sub small" style="white-space:pre-wrap; color:var(--teal)">' + escapeHtml(g.note) + '</p>' : "")
-        + '</div>';
-    }).join("");
-}
-(function initExTypes() {
-  const sel = $("exType");
-  EX_TYPES.forEach((t) => { const o = document.createElement("option"); o.value = t; o.textContent = t; sel.appendChild(o); });
-})();
-$("exAddBtn").addEventListener("click", async () => {
-  const desc = $("exDesc").value.trim();
-  if (!desc) { toast("先填一下運動內容吧"); return; }
-  await idbPut("exercises", { date: todayStr(), ts: Date.now(), type: $("exType").value, desc });
-  $("exDesc").value = "";
-  toast("已記錄運動");
-  renderGym();
-});
-
-/* 通用 Gemini 文字請求(模型自動輪替) */
-async function geminiText(key, prompt) {
-  const body = { contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.4 } };
-  const cached = localStorage.getItem("ft_model");
-  let candidates = MODEL_CANDIDATES.slice();
-  if (cached) candidates = [cached].concat(candidates.filter((m) => m !== cached));
-  let resp = null;
-  let lastResp = null;
-  for (const model of candidates) {
-    try { resp = await geminiCall(model, key, body); }
-    catch (e) { throw new Error("連線失敗,請確認網路。"); }
-    if (resp.status === 404 || resp.status === 429 || resp.status === 500 || resp.status === 503) { lastResp = resp; resp = null; continue; }
-    if (resp.ok) localStorage.setItem("ft_model", model);
-    break;
-  }
-  if (resp === null) {
-    const found = await listFlashModel(key);
-    if (found) { resp = await geminiCall(found, key, body); if (resp.ok) localStorage.setItem("ft_model", found); }
-  }
-  if (!resp && lastResp) resp = lastResp;
-  if (!resp) throw new Error("目前找不到可用的 Gemini 模型,請稍後再試。");
-  if (!resp.ok) {
-    if (resp.status === 400 || resp.status === 403) throw new Error("API Key 可能有誤(HTTP " + resp.status + ")");
-    if (resp.status === 429) throw new Error("AI 額度暫時用完(HTTP 429),等 1-2 分鐘再試。");
-    if (resp.status === 503 || resp.status === 500) throw new Error("Google 伺服器暫時忙碌(HTTP " + resp.status + "),等幾秒再按一次即可。");
-    throw new Error("AI 分析失敗(HTTP " + resp.status + ")");
-  }
-  const json = await resp.json();
-  try { return json.candidates[0].content.parts[0].text; }
-  catch (e) { throw new Error("AI 回覆格式無法解析"); }
-}
-
-$("coachBtn").addEventListener("click", async () => {
-  const key = getApiKey();
-  if (!key) { $("coachStatus").textContent = "請先到「設定」貼上 Gemini API Key。"; return; }
-  const btn = $("coachBtn");
-  btn.disabled = true;
-  $("coachStatus").textContent = "AI 教練分析中…";
-  try {
-    const all = await idbAll("exercises");
-    const today = todayStr();
-    const t = all.filter((e) => e.date === today);
-    const recent = all.filter((e) => e.date !== today).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 15);
-    const h = await idbGet("health", today);
-    const prompt = "你是專業健身教練兼營養師。以下是我今天的資料:\n"
-      + "【今日運動】" + (t.length ? t.map((e) => e.type + ":" + e.desc).join(";") : "還沒運動") + "\n"
-      + "【近期運動】" + (recent.length ? recent.map((e) => e.date.slice(5) + " " + e.type + ":" + e.desc).join(";") : "無紀錄") + "\n"
-      + (h && h.activeEnergy != null ? "【今日活動消耗】" + Math.round(h.activeEnergy) + " kcal\n" : "")
-      + "【飲食狀況】" + await buildDietContext() + "\n"
-      + "請用繁體中文回覆,不要用任何 markdown 符號,分三段,各段以下列標題開頭:\n"
-      + "訓練評語:(2-3句,評今天的訓練安排與強度,搭配近期紀錄給下次建議)\n"
-      + "營養缺口:(用具體數字說明今天蛋白質、碳水、脂肪、熱量各還差多少)\n"
-      + "下一餐建議:(考慮運動內容與缺口,給出具體餐點與份量,例如便利商店或自助餐怎麼買)";
-    const text = (await geminiText(key, prompt)).trim();
-    $("coachOutput").textContent = text;
-    $("coachStatus").textContent = "";
-    await idbPut("coach", { date: today, ts: Date.now(), text });
-    renderGym();
-  } catch (err) {
-    $("coachStatus").textContent = err.message;
-  } finally {
-    btn.disabled = false;
-  }
-});
-
-/* ==================================================
-   重訓計時
-================================================== */
-const GYM_C = 704;
-let gym = { phase: "idle", setNumber: 1, phaseStart: 0, lastSetDuration: 0, sets: [], notified: false };
-let wakeLock = null;
-async function keepAwake(on) {
-  try {
-    if (on && "wakeLock" in navigator && !wakeLock) {
-      wakeLock = await navigator.wakeLock.request("screen");
-      wakeLock.addEventListener("release", () => { wakeLock = null; });
-    } else if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
-  } catch (e) { /* 不支援就算了 */ }
-}
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && gym.phase !== "idle") keepAwake(true);
-});
-function beep(times) {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    for (let i = 0; i < times; i++) {
-      const o = ctx.createOscillator(), g = ctx.createGain();
-      o.connect(g); g.connect(ctx.destination);
-      o.frequency.value = 880;
-      const t = ctx.currentTime + i * 0.35;
-      g.gain.setValueAtTime(0.001, t);
-      g.gain.exponentialRampToValueAtTime(0.4, t + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.001, t + 0.28);
-      o.start(t); o.stop(t + 0.3);
-    }
-  } catch (e) {}
-  if (navigator.vibrate) navigator.vibrate([300, 120, 300]);
-}
-function restSeconds() { return Number($("gymRest").value) || 90; }
-function gymTick() {
-  const now = Date.now();
-  const elapsed = (now - gym.phaseStart) / 1000;
-  const ring = $("gymRing");
-  if (gym.phase === "working") {
-    $("gymTime").textContent = fmtMin(elapsed);
-    ring.setAttribute("stroke", "var(--green)");
-    ring.setAttribute("stroke-dashoffset", "0");
-  } else if (gym.phase === "resting") {
-    const remain = restSeconds() - elapsed;
-    $("gymTime").textContent = fmtMin(Math.max(remain, 0));
-    ring.setAttribute("stroke", remain > 10 ? "var(--blue)" : "var(--red)");
-    ring.setAttribute("stroke-dashoffset", String(GYM_C * (1 - Math.max(remain, 0) / restSeconds())));
-    if (remain <= 0 && !gym.notified) {
-      gym.notified = true;
-      $("gymPhaseLabel").textContent = "休息結束!";
-      $("gymPhaseLabel").style.color = "var(--red)";
-      beep(3);
-    }
-  }
-}
-setInterval(gymTick, 200);
-
-function updateGymUI() {
-  const main = $("gymMainBtn"), finish = $("gymFinishBtn");
-  const label = $("gymPhaseLabel"), sub = $("gymSubLabel");
-  label.style.color = "";
-  if (gym.phase === "idle") {
-    label.textContent = "準備好了嗎?";
-    $("gymTime").textContent = "0:00";
-    sub.textContent = "";
-    $("gymRing").setAttribute("stroke-dashoffset", String(GYM_C));
-    main.textContent = "開始第 " + gym.setNumber + " 組";
-    main.style.background = "var(--accent)";
-    finish.style.display = gym.sets.length ? "block" : "none";
-  } else if (gym.phase === "working") {
-    label.textContent = "第 " + gym.setNumber + " 組進行中";
-    sub.textContent = "";
-    main.textContent = "這組結束,開始休息";
-    main.style.background = "var(--accent-blue)";
-    finish.style.display = "block";
-  } else {
-    label.textContent = "休息中";
-    sub.textContent = "上一組做了 " + fmtMin(gym.lastSetDuration);
-    main.textContent = "開始第 " + gym.setNumber + " 組";
-    main.style.background = "var(--accent)";
-    finish.style.display = "block";
-  }
-}
-function renderGymLog() {
-  const el = $("gymLog");
-  el.innerHTML = gym.sets.length === 0 ? '<p class="sub small">尚無紀錄</p>' :
-    gym.sets.slice().reverse().map((s) =>
-      `<div class="listitem"><div class="grow"><div class="name">${escapeHtml(s.name || "動作")} 第 ${s.set} 組</div></div>
-       <div class="detail">做 ${fmtMin(s.duration)}・休 ${s.rest ? fmtMin(s.rest) : "--"}</div></div>`
-    ).join("");
-}
-$("gymMainBtn").addEventListener("click", () => {
-  const now = Date.now();
-  if (gym.phase === "working") {
-    // 結束這組 → 休息
-    gym.lastSetDuration = (now - gym.phaseStart) / 1000;
-    gym.sets.push({ name: $("gymExercise").value.trim(), set: gym.setNumber, duration: gym.lastSetDuration, rest: 0 });
-    gym.setNumber++;
-    gym.phase = "resting";
-    gym.phaseStart = now;
-    gym.notified = false;
-  } else {
-    // idle 或 resting → 開始下一組
-    if (gym.phase === "resting" && gym.sets.length) {
-      gym.sets[gym.sets.length - 1].rest = (now - gym.phaseStart) / 1000;
-    }
-    gym.phase = "working";
-    gym.phaseStart = now;
-    gym.notified = false;
-    keepAwake(true);
-  }
-  updateGymUI();
-  renderGym();
-  renderGymLog();
-});
-$("gymFinishBtn").addEventListener("click", async () => {
-  if (gym.phase === "working") {
-    gym.sets.push({ name: $("gymExercise").value.trim(), set: gym.setNumber, duration: (Date.now() - gym.phaseStart) / 1000, rest: 0 });
-  }
-  if (gym.sets.length) {
-    await idbPut("workouts", { date: todayStr(), ts: Date.now(), sets: gym.sets });
-    toast("已儲存本次訓練(" + gym.sets.length + " 組)");
-  }
-  gym = { phase: "idle", setNumber: 1, phaseStart: 0, lastSetDuration: 0, sets: [], notified: false };
-  keepAwake(false);
-  updateGymUI();
-  renderGymLog();
-});
-(function initGymRest() {
-  const sel = $("gymRest");
-  [30, 45, 60, 90, 120, 150, 180, 240, 300].forEach((s) => {
-    const o = document.createElement("option");
-    o.value = s; o.textContent = fmtMin(s);
-    sel.appendChild(o);
-  });
-  sel.value = String(getSettings().rest);
-})();
 
 /* ==================================================
    設定
@@ -1252,7 +921,6 @@ function loadSettingsUI() {
     $("s" + k + "_pro").value = d.protein;
     $("s" + k + "_fat").value = d.fat;
   }
-  $("sRest").value = s.rest;
   $("sApiKey").value = getApiKey();
   const p = getProfile();
   $("pHeight").value = p.height || "";
@@ -1273,9 +941,7 @@ $("sSaveBtn").addEventListener("click", () => {
     cardio: { kcal: read("sC_kcal", 2000), carb: read("sC_carb", 250), protein: read("sC_pro", 120), fat: read("sC_fat", 65) },
     rest:   { kcal: read("sR_kcal", 1800), carb: read("sR_carb", 200), protein: read("sR_pro", 120), fat: read("sR_fat", 55) },
   };
-  s.rest = read("sRest", DEFAULTS.rest);
   saveSettings(s);
-  $("gymRest").value = String(s.rest);
   toast("設定已儲存");
   renderFood();
 });
@@ -1299,9 +965,10 @@ $("aiTargetBtn").addEventListener("click", async () => {
   btn.disabled = true;
   out.textContent = "AI 計算中…";
   try {
-    const ex = (await idbAll("exercises")).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 15);
+    const exm = exNotes();
+    const exRecent = Object.keys(exm).sort().slice(-7).map((d) => d.slice(5) + " " + exm[d]).join(";");
     const prompt = "你是運動營養師。" + profileText()
-      + "近期運動紀錄:" + (ex.length ? ex.map((e) => e.date.slice(5) + " " + e.type + ":" + e.desc).join(";") : "無")
+      + "近期運動紀錄:" + (exRecent || "無")
       + '。請用 Mifflin-St Jeor 公式估算我的 BMR 與 TDEE,再幫我設定三種日子的每日目標(重訓日/有氧日/休息日)。'
       + '請「只」回傳以下格式的 JSON,不要加任何其他文字:'
       + '{"train":{"kcal":數字,"carb":數字,"protein":數字,"fat":數字},"cardio":{"kcal":數字,"carb":數字,"protein":數字,"fat":數字},"rest":{"kcal":數字,"carb":數字,"protein":數字,"fat":數字},"reason":"繁體中文:先說明 BMR/TDEE 估算結果、判斷的目標方向、蛋白質用多少 g/kg、三種日為何這樣配;最後附一份符合目標的一日示範菜單(早/午/晚/點心,含具體品項與份量)"}'
@@ -1406,7 +1073,10 @@ $("exportBtn").addEventListener("click", async () => {
     settings: getSettings(),
     health: await idbAll("health"),
     meals: await idbAll("meals"),
-    workouts: await idbAll("workouts"),
+    coach: await idbAll("coach"),
+    favorites: getFavs(),
+    exlog: exNotes(),
+    profile: getProfile(),
   };
   const blob = new Blob([JSON.stringify(data, null, 1)], { type: "application/json" });
   const a = document.createElement("a");
@@ -1418,10 +1088,12 @@ $("exportBtn").addEventListener("click", async () => {
 $("wipeBtn").addEventListener("click", async () => {
   if (!confirm("確定要刪除所有資料?此動作無法復原。")) return;
   await Promise.all([idbClear("meals"), idbClear("health"), idbClear("workouts"), idbClear("hkworkouts"), idbClear("exercises"), idbClear("coach")]);
+  ["ft_exlog", "ft_favorites", "ft_daytypes", "ft_profile", "ft_target_reason"].forEach((k) => { try { localStorage.removeItem(k); } catch (e) {} });
   localStorage.removeItem("ft_settings");
   localStorage.removeItem("ft_apikey");
   loadSettingsUI();
-  renderHealth(); renderFood();
+  dietThread = []; dietChatRecId = null;
+  renderFood();
   toast("已清除所有資料");
 });
 
@@ -1438,16 +1110,12 @@ function openDBRetry(times) {
 }
 (async function init() {
   loadSettingsUI(); // 設定與 API Key 欄位不依賴資料庫,最先載入
-  updateGymUI();
-  renderGymLog();
   try {
     await openDBRetry(4);
   } catch (e) {
     toast("儲存空間啟動失敗,請完全關閉 App 後重開一次");
     return;
   }
-  renderGym();
-  await renderHealth();
   await renderFood();
   if ("serviceWorker" in navigator && location.protocol === "https:") {
     navigator.serviceWorker.register("sw.js").catch(() => {});
